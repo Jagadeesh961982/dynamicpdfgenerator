@@ -1,0 +1,21 @@
+# ── Core pipeline (all required) ──────────────────────────────────
+# No extra dependencies for base flow — uses only Python stdlib
+
+# ── Better console output (highly recommended) ────────────────────
+rich>=13.0.0
+
+# ── CSV input support ─────────────────────────────────────────────
+pandas>=2.0.0
+
+# ── PDF input support (to use .pdf files as input) ────────────────
+pdfplumber>=0.10.0
+# or: PyPDF2>=3.0.0
+
+# ── PDF export (install ONE of these) ─────────────────────────────
+# Option A — Playwright (recommended, best quality)
+playwright>=1.40.0
+#   After pip install, also run:
+#   playwright install chromium
+
+# Option B — pdfkit (needs wkhtmltopdf binary installed separately)
+# pdfkit>=1.0.0
