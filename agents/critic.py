@@ -2,15 +2,16 @@
 #
 # AGENT 4 — CRITIC
 # ══════════════════
-# Reads the assembled HTML + slide plan + parsed facts
+# Content-agnostic quality reviewer.
+# Reads the assembled HTML + slide plan + content analysis
 # Scores on 5 weighted dimensions (0-10 each)
 # Returns: weighted score, per-slide feedback, slides_to_fix list
 #
 # DIMENSIONS (with weights):
-#   data_accuracy   0.30  — exact numbers match facts, real hostnames, real timestamps
-#   visual_quality  0.25  — charts readable, no raw markdown, no empty slides
+#   data_accuracy   0.30  — content matches source facts / is factually correct
+#   visual_quality  0.25  — visuals rendered, no raw markdown, no empty slides
 #   insight_depth   0.25  — slides tell specific stories, not generic overviews
-#   completeness    0.10  — key topics covered (not missing major issues)
+#   completeness    0.10  — key topics covered, nothing major missing
 #   layout_design   0.10  — spacing, readability, visual hierarchy
 
 import json, re, sys
@@ -78,30 +79,39 @@ class CriticResult:
         print(f"{'═'*62}\n")
 
 
-CRITIC_PROMPT = """You are a strict quality reviewer for executive SRE presentations.
-Review this HTML slide report and score it on 5 dimensions (0.0–10.0 each).
+CRITIC_PROMPT = """You are a strict quality reviewer for professional PDF presentations.
+Review this HTML slide report and score it on 5 dimensions (0.0-10.0 each).
+
+REPORT CONTEXT:
+  Content type: {content_type}
+  Subject: {subject}
+  Target audience: {audience}
+  Data richness: {data_richness}
 
 SCORING GUIDE:
-  9-10 = NotebookLM quality — specific, visual, insightful
+  9-10 = NotebookLM quality — specific, visual, insightful, publication-ready
   7-8  = Good — mostly specific, minor generic sections
   5-6  = Mediocre — some placeholder/generic content
   3-4  = Poor — many generic sections, missing data
-  1-2  = Unacceptable — almost no real data used
+  1-2  = Unacceptable — almost no real content
 
 DIMENSIONS:
-  data_accuracy  — Are EXACT numbers from the facts used? Real hostnames? Real timestamps?
-                   Or just placeholder values like "X alerts" / "some hosts"?
-  visual_quality — Are visuals actually rendered (SVG present)? Readable?
-                   No raw **markdown** in text? No empty slides? Charts have real data?
+  data_accuracy  — Is the content factually correct? Are real numbers, names, facts used?
+                   Or just placeholder values like "X items" / "some systems"?
+                   For knowledge-based content: are the facts accurate and specific?
+  visual_quality — Are visuals actually rendered? Readable charts OR strong infographic layouts
+                   (cards, icons, hierarchy, real data in callouts)? No raw **markdown** in text?
+                   No empty slides? Chart.js charts must have real data; infographic slides count
+                   equally — do not penalize for skipping generic bar charts when layout is rich.
   insight_depth  — Do slides have SPECIFIC, NAMED insights?
-                   ("Kafka lag: 785,744 — 157× above threshold") vs generic
-                   ("High Kafka lag observed")? Do slides tell a story?
-  completeness   — Are the major issues covered (Kafka, disk, CPU, Redis, flapping)?
-                   Is there a cover, stats, deep dives, recommendations?
-  layout_design  — Clean spacing? Text not overlapping SVG? Print-ready?
+                   Do they tell a concrete story with real examples?
+                   Or are they generic overviews that could apply to anything?
+  completeness   — Are the major topics/themes covered?
+                   Is there a cover, detailed analysis, and conclusion/recommendations?
+  layout_design  — Clean spacing? Text not overlapping visuals? Print-ready?
                    Proper font sizes (headings 28-48px, body 14-18px)?
 
-PARSED FACTS TO VERIFY AGAINST:
+KEY FACTS TO VERIFY AGAINST:
 {key_facts}
 
 SLIDE PLAN (what was intended):
@@ -148,63 +158,67 @@ Return ONLY this JSON (no markdown):
 RULES for slides_to_fix:
 - Only list slides genuinely needing fixes (score <7 or broken visuals)
 - Maximum 5 slides
-- "problem" must be concrete: "Slide shows 'X alerts' instead of exact 342"
-- "fix" must be actionable: "Use exact value 342 from facts. Show bar chart with 9 time points."
+- "problem" must be concrete: "Slide shows generic text instead of specific data"
+- "fix" must be actionable: "Use exact values from the content analysis"
 - Empty/placeholder slides MUST be in slides_to_fix"""
 
 
 def _extract_slide_previews(html: str) -> list:
-    """Extract text preview of each slide to help critic identify issues."""
     previews = []
     for m in re.finditer(r'data-slot="(\d+)"[^>]*>(.*?)</section>', html, re.DOTALL):
         slot = int(m.group(1))
         text = re.sub(r'<[^>]+>', ' ', m.group(2))
         text = re.sub(r'\s+', ' ', text).strip()[:200]
         has_svg = '<svg' in m.group(2).lower()
+        has_chart = 'new chart(' in m.group(2).lower()
         is_short = len(text.strip()) < 80
         previews.append({
             'slot': slot,
             'preview': text[:150],
             'has_svg': has_svg,
+            'has_chart': has_chart,
             'is_short': is_short,
         })
     return previews
 
 
-def _quick_checks(html: str, facts: dict) -> list:
-    """Fast deterministic checks before LLM review."""
+def _quick_checks(html: str, plan: dict) -> list:
     issues = []
     if re.search(r'\*\*[^<]{1,60}\*\*', html):
         issues.append("Raw **markdown** bold found in HTML output")
-    if html.count('<section') < 8:
-        n = html.count('<section')
-        issues.append(f"Only {n} slides found — expected 10+")
+
+    n_slides = html.count('<section')
+    target = config.N_SLIDES
+    if n_slides < max(target - 4, 6):
+        issues.append(f"Only {n_slides} slides found — expected {target}+")
+
     if 'placeholder' in html.lower() or 'lorem ipsum' in html.lower():
         issues.append("Placeholder text detected")
-    # Check for actual numbers from facts
-    total = facts.get('total_alerts', 0)
-    if total and str(total) not in html:
-        issues.append(f"Total alert count ({total}) not found in HTML")
+
+    analysis = plan.get('_analysis', {})
+    entities = analysis.get('key_entities', [])
+    if entities:
+        found = sum(1 for e in entities[:8] if e.lower() in html.lower())
+        if found < len(entities[:8]) // 3:
+            issues.append(f"Only {found}/{len(entities[:8])} key entities found in HTML")
+
     return issues
 
 
 def run(html: str, plan: dict) -> CriticResult:
     print("  [Critic] Reviewing report quality...")
 
-    facts     = plan.get('_parsed', {})
+    analysis = plan.get('_analysis', {})
     plan_slides = plan.get('slides', [])
 
+    key_facts_list = analysis.get('key_facts', [])
     key_facts = json.dumps({
-        'total_alerts':   facts.get('total'),
-        'firing':         facts.get('firing'),
-        'kafka_lag_max':  facts.get('kafka_max_lag'),
-        'cpu_max':        facts.get('cpu_max'),
-        'critical_disk':  facts.get('critical_disk'),
-        'redis_nodes':    facts.get('redis_nodes'),
-        'duration':       facts.get('duration'),
-        'time_start':     facts.get('time_start'),
-        'time_end':       facts.get('time_end'),
-    }, indent=2)[:1000]
+        'content_type': analysis.get('content_type', 'unknown'),
+        'subject': analysis.get('subject', ''),
+        'key_entities': analysis.get('key_entities', [])[:10],
+        'top_facts': [f.get('fact', '') for f in key_facts_list[:10]],
+        'data_richness': analysis.get('data_richness', 'unknown'),
+    }, indent=2)[:1500]
 
     slide_plan_summary = "\n".join(
         f"  Slot {s.get('slot'):2d}: [{s.get('visual_type','?'):20s}] {s.get('title','')[:55]}"
@@ -218,9 +232,13 @@ def run(html: str, plan: dict) -> CriticResult:
         for p in slide_previews_data
     )
 
-    known_issues = _quick_checks(html, facts)
+    known_issues = _quick_checks(html, plan)
 
     prompt = CRITIC_PROMPT.format(
+        content_type       = analysis.get('content_type', 'unknown'),
+        subject            = analysis.get('subject', '')[:200],
+        audience           = analysis.get('audience', 'General'),
+        data_richness      = analysis.get('data_richness', 'unknown'),
         key_facts          = key_facts,
         slide_plan_summary = slide_plan_summary[:1500],
         slide_previews     = slide_previews_text[:2000],
@@ -243,15 +261,14 @@ def run(html: str, plan: dict) -> CriticResult:
             "verdict":            f"Deterministic score ({n} issues detected)",
         }
 
-    # Merge LLM slides_to_fix with deterministically flagged short slides
-    llm_fixes   = raw.get("slides_to_fix") or []
-    llm_slots   = {int(s.get("slot", 0)) for s in llm_fixes}
+    llm_fixes = raw.get("slides_to_fix") or []
+    llm_slots = {int(s.get("slot", 0)) for s in llm_fixes}
     for p in slide_previews_data:
         if p['is_short'] and p['slot'] not in llm_slots:
             llm_fixes.append({
                 "slot":    p['slot'],
                 "problem": f"Slide {p['slot']} appears empty or too short",
-                "fix":     "Re-render with full visual and actual data",
+                "fix":     "Re-render with full visual and actual content",
             })
             llm_slots.add(p['slot'])
 
@@ -264,7 +281,6 @@ def run(html: str, plan: dict) -> CriticResult:
     )
     result.compute_score()
 
-    # Hard cap if known deterministic issues found
     if known_issues:
         result.weighted_score = min(result.weighted_score, 6.5)
         result.passed = result.weighted_score >= config.PASS_THRESHOLD

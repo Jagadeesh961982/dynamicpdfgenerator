@@ -7,7 +7,7 @@
 # OpenRouter API is OpenAI-compatible:
 #   POST https://openrouter.ai/api/v1/chat/completions
 #   Authorization: Bearer <key>
-#   Body: { model, messages, response_format, temperature, max_tokens }
+#   Body: { model, messages, temperature, max_tokens } — optional response_format for JSON-only calls
 #
 # The "key" argument maps to a model:
 #   key="summarizer" → config.MODEL_SUMMARIZER
@@ -61,7 +61,8 @@ def _parse(text: str) -> Optional[dict]:
 def _resolve_model(key: str) -> str:
     """Map a key string to the configured model name."""
     mapping = {
-        # New 4-agent keys
+        # 5-agent keys (analyzer + 4 agents)
+        "analyzer":  getattr(config, "MODEL_ANALYZER",  "google/gemini-2.5-flash"),
         "planner":   getattr(config, "MODEL_PLANNER",   getattr(config, "MODEL_SUMMARIZER",  "google/gemini-2.5-flash")),
         "designer":  getattr(config, "MODEL_DESIGNER",  getattr(config, "MODEL_HTML_AGENT",  "google/gemini-2.5-flash")),
         "assembler": getattr(config, "MODEL_ASSEMBLER", getattr(config, "MODEL_HTML_AGENT",  "google/gemini-2.5-flash")),
@@ -79,7 +80,8 @@ def _resolve_model(key: str) -> str:
 # ── OpenRouter call ───────────────────────────────────────────────
 
 def _call_openrouter(prompt: str, model: str,
-                     max_tokens: int = 8000, retries: int = 3) -> str:
+                     max_tokens: int = 8000, retries: int = 3,
+                     json_mode: bool = False) -> str:
     api_key = config.OPENROUTER_API_KEY
     if not api_key or "YOUR_" in api_key:
         raise RuntimeError(
@@ -101,10 +103,10 @@ def _call_openrouter(prompt: str, model: str,
         "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens":  max_tokens,
-        # Ask for JSON output when the model supports it
-        # (works for OpenAI, Gemini via OpenRouter, Claude via OpenRouter)
-        "response_format": {"type": "json_object"},
     }
+    # Only for call_json() — forcing json_object breaks agents that need raw HTML/text (designer).
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
 
     data = json.dumps(payload).encode()
     req  = urllib.request.Request(url, data, headers)
@@ -143,8 +145,8 @@ def _call_openrouter(prompt: str, model: str,
 
             elif e.code == 400:
                 # Some models don't support response_format=json_object
-                # Retry without it
-                if '"response_format"' in body or "response_format" in body:
+                # Retry without it (only when we asked for JSON mode)
+                if json_mode and ('"response_format"' in body or "response_format" in body):
                     print(f"  [info] model {model} doesn't support response_format — retrying without")
                     payload.pop("response_format", None)
                     data = json.dumps(payload).encode()
@@ -170,7 +172,8 @@ def _call_openrouter(prompt: str, model: str,
 # ── Gemini direct call (original, unchanged) ──────────────────────
 
 def _call_gemini(prompt: str, key: str,
-                 max_tokens: int = 8000, retries: int = 3) -> str:
+                 max_tokens: int = 8000, retries: int = 3,
+                 json_mode: bool = False) -> str:
     api_key = config.GEMINI_KEY_1 if key in ("key1", "summarizer", "html") else config.GEMINI_KEY_2
     if not api_key or "YOUR_" in api_key:
         raise RuntimeError(
@@ -180,13 +183,15 @@ def _call_gemini(prompt: str, key: str,
         )
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
            f"{config.GEMINI_MODEL}:generateContent?key={api_key}")
+    gen_cfg = {
+        "temperature": 0.2,
+        "maxOutputTokens": max_tokens,
+    }
+    if json_mode:
+        gen_cfg["responseMimeType"] = "application/json"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": max_tokens,
-            "responseMimeType": "application/json",
-        },
+        "generationConfig": gen_cfg,
     }
     req  = urllib.request.Request(
         url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
@@ -219,20 +224,23 @@ def _call_gemini(prompt: str, key: str,
 # ── Public API ────────────────────────────────────────────────────
 
 def call(prompt: str, key: str = "key1",
-         max_tokens: int = 8000, retries: int = 3) -> str:
+         max_tokens: int = 8000, retries: int = 3,
+         json_mode: bool = False) -> str:
     """
     Make a single LLM call. Returns raw text.
 
     key: "summarizer" | "html" | "critic"   (semantic names)
          "key1" | "key2" | "key3"           (backwards-compat)
+    json_mode: If True, request JSON from the provider (used by call_json only).
+               Must be False for designer/HTML agents — otherwise APIs force tiny JSON objects.
     """
     provider = getattr(config, "PROVIDER", "gemini")
 
     if provider == "openrouter":
         model = _resolve_model(key)
-        return _call_openrouter(prompt, model, max_tokens, retries)
+        return _call_openrouter(prompt, model, max_tokens, retries, json_mode)
     else:
-        return _call_gemini(prompt, key, max_tokens, retries)
+        return _call_gemini(prompt, key, max_tokens, retries, json_mode)
 
 
 def call_json(prompt: str, key: str = "key1",
@@ -244,7 +252,7 @@ def call_json(prompt: str, key: str = "key1",
     last = ""
     for attempt in range(retries):
         try:
-            last = call(prompt, key=key, max_tokens=max_tokens)
+            last = call(prompt, key=key, max_tokens=max_tokens, retries=retries, json_mode=True)
         except RuntimeError:
             raise
         except Exception as e:

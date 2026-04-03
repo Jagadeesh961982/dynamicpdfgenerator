@@ -1,29 +1,16 @@
 # agents/planner.py
 #
-# AGENT 1 — NARRATIVE PLANNER
-# ════════════════════════════
-# Step 1 (Python): Parse raw data → exact counts, time series, patterns
-# Step 2 (LLM):    Given parsed facts → design 12 slide STORIES
-#                  Each story has: a unique angle/title, the key insight,
-#                  what visual would best tell that story, and the data to use.
+# AGENT 0+1 — CONTENT ANALYZER + NARRATIVE PLANNER
+# ══════════════════════════════════════════════════
+# NotebookLM-style architecture:
+#   Step 1 (Python): Chunk raw text (format-agnostic, no regex assumptions)
+#   Step 2 (LLM):    Analyze content — understand what it is, extract facts
+#   Step 3 (LLM):    Design N slide stories based on the analysis
 #
-# OUTPUT: slide_plan.json  — list of 12 slide dicts, each with:
-#   {
-#     "slot": 1,
-#     "title": "The Kafka Backlog: 785,744 Messages Waiting",
-#     "subtitle": "Executive SRE Diagnostic Report",
-#     "story_angle": "Show the scale of the problem with a single shocking number",
-#     "key_insight": "Consumer lag grew 8% over 24h, data pipeline SLA at risk",
-#     "data": { ... only the relevant data for this slide ... },
-#     "visual_type": "big_number_hero | bar_chart | topology | funnel | timeline | etc.",
-#     "visual_description": "A large 785,744 in red center, with a small bottle-neck SVG",
-#     "layout_hint": "centered | left_text_right_visual | full_visual | two_col",
-#     "color_mood": "critical_red | warning_amber | info_blue | neutral",
-#   }
+# Works with ANY input: alerts, logs, topics, questions, CSV, docs, etc.
+# The LLM does the understanding — Python only does plumbing.
 
 import re, sys, json
-from collections import defaultdict, Counter
-from datetime import datetime, timedelta
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.llm import call_json
@@ -31,263 +18,144 @@ import config
 
 
 # ══════════════════════════════════════════════════════════════════
-#  PYTHON PARSER  (token-free, handles any volume)
+#  FORMAT-AGNOSTIC TEXT CHUNKER
+#  Splits any text into digestible pieces — no format assumptions
 # ══════════════════════════════════════════════════════════════════
 
-def _classify(subject: str) -> str:
-    s = subject
-    if 'Kafka_Consumer_Lag' in s or 'Kafka Consumer Lag' in s: return 'Kafka Consumer Lag'
-    if 'DatasourceError' in s:    return 'Datasource Error'
-    if 'PNC_POD CPU' in s or 'pod cpu' in s.lower(): return 'Kubernetes Pod CPU'
-    if 'Windows Disk' in s:       return 'Windows Disk Space'
-    if 'Windows Memory' in s:     return 'Windows Memory'
-    if 'Linux_High_Disk' in s or 'Linux HighDisk' in s or 'HighDiskSpace' in s:
-                                   return 'Linux Disk Space'
-    if 'Average_DNS_Lookup' in s or 'DNS_Lookup' in s: return 'DNS Lookup Latency'
-    if 'Http_Response_Time' in s: return 'HTTP Response Time'
-    if 'Http_Status_Code' in s:   return 'HTTP Status Code'
-    if 'hit rate' in s.lower():   return 'Redis Cache Hit Rate'
-    if 'MongoDB' in s or 'clients currently' in s: return 'MongoDB Connections'
-    return 'Other'
+def _chunk_text(raw: str, max_chunk_chars: int = 3500) -> list:
+    raw = raw.strip()
+    if not raw:
+        return []
+    if len(raw) <= max_chunk_chars:
+        return [raw]
 
-
-def _parse_raw(raw: str) -> dict:
-    """Parse every alert block. Return rich structured facts."""
-    blocks = [b.strip() for b in raw.split('========== ALERT ==========') if b.strip()]
-    alerts = []
-    for b in blocks:
-        def g(f, _b=b):
-            m = re.search(rf'{f}\s*:\s*(.+)', _b)
-            return m.group(1).strip() if m else ''
-        alerts.append({
-            'subject':     g('Subject'),
-            'description': g('Description'),
-            'status':      g('Status'),
-            'time':        g('Time'),
-            'date':        g('Date'),
-            'agent':       g('Agent'),
-            'raw':         b,
-        })
-    if not alerts:
-        return {}
-
-    # ── Time range ──────────────────────────────────────────────
-    times = []
-    for a in alerts:
-        try:
-            times.append(datetime.strptime(f"{a['date']} {a['time']}", "%Y-%m-%d %H:%M:%S"))
-        except: pass
-    times.sort()
-    t0, t1 = (times[0] if times else None), (times[-1] if times else None)
-
-    # ── Counts ──────────────────────────────────────────────────
-    type_counts = Counter(_classify(a['subject']) for a in alerts)
-    total       = len(alerts)
-    firing      = sum(1 for a in alerts if 'Firing'   in a['status'])
-    resolved    = sum(1 for a in alerts if 'Resolved' in a['status'])
-
-    # ── Hosts ────────────────────────────────────────────────────
-    hosts = Counter()
-    host_types = defaultdict(set)
-    for a in alerts:
-        ag = a['agent'].strip()
-        if ag and ag.lower() != 'nan':
-            hosts[ag] += 1
-            host_types[ag].add(_classify(a['subject']))
-
-    # ── Series: Kafka lag ─────────────────────────────────────────
-    kafka_series = []
-    for a in alerts:
-        if 'Kafka' in _classify(a['subject']):
-            m = re.search(r'current lag count (\d+)', a['description'])
-            if m:
-                try:
-                    dt = datetime.strptime(f"{a['date']} {a['time']}", "%Y-%m-%d %H:%M:%S")
-                    kafka_series.append((dt, int(m.group(1))))
-                except: pass
-    kafka_series.sort()
-
-    # ── Series: CPU ───────────────────────────────────────────────
-    cpu_series = []
-    for a in alerts:
-        if 'Kubernetes Pod CPU' in _classify(a['subject']):
-            m = re.search(r'current utilization is ([\d.]+)%', a['description'])
-            if m:
-                try:
-                    dt = datetime.strptime(f"{a['date']} {a['time']}", "%Y-%m-%d %H:%M:%S")
-                    cpu_series.append((dt, float(m.group(1))))
-                except: pass
-    cpu_series.sort()
-
-    # ── Critical disk hosts ───────────────────────────────────────
-    critical_disk = {}
-    for a in alerts:
-        if 'Disk' in _classify(a['subject']):
-            m = re.search(r'([\d.]+)%', a['description'])
-            ag = a['agent'].strip()
-            if m and ag and ag.lower() != 'nan':
-                pct = float(m.group(1))
-                if ag not in critical_disk or pct > critical_disk[ag]:
-                    critical_disk[ag] = pct
-
-    # ── Redis nodes ───────────────────────────────────────────────
-    redis_nodes = {}
-    for a in alerts:
-        if 'Redis' in _classify(a['subject']):
-            m = re.search(r'Redis Node (\S+)', a['description'])
-            if m:
-                node = m.group(1)
-                hr = re.search(r'hit rate[:\s]*([\d.]+)%', a['description'], re.I)
-                redis_nodes[node] = float(hr.group(1)) if hr else 0.0
-
-    # ── MongoDB connections ───────────────────────────────────────
-    mongo_connections = {}
-    for a in alerts:
-        if 'MongoDB' in _classify(a['subject']):
-            m = re.search(r'(\d+) clients currently', a['description'])
-            ag = a['agent'].strip()
-            if m and ag and ag.lower() != 'nan':
-                mongo_connections[ag] = max(mongo_connections.get(ag, 0), int(m.group(1)))
-
-    # ── DNS / HTTP details ────────────────────────────────────────
-    dns_projects = set()
-    for a in alerts:
-        if 'DNS' in _classify(a['subject']):
-            m = re.search(r'project[:\s]+([^\n,]+)', a['description'], re.I)
-            if m: dns_projects.add(m.group(1).strip()[:60])
-    http_hosts = set()
-    for a in alerts:
-        if 'HTTP' in _classify(a['subject']):
-            m = re.search(r'url[:\s]+(\S+)', a['description'], re.I)
-            if m: http_hosts.add(m.group(1).strip()[:60])
-
-    # ── Flapping detection ────────────────────────────────────────
-    fr = defaultdict(lambda: {'fire': 0, 'resolve': 0, 'times': []})
-    for a in alerts:
-        key = re.sub(r'\[(FIRING|RESOLVED)[^\]]*\]\s*', '', a['subject']).strip()[:80]
-        try:
-            t = datetime.strptime(f"{a['date']} {a['time']}", "%Y-%m-%d %H:%M:%S")
-            fr[key]['times'].append(t)
-        except: pass
-        if 'Firing'   in a['status']: fr[key]['fire']    += 1
-        if 'Resolved' in a['status']: fr[key]['resolve'] += 1
-
-    flapping = []
-    for k, v in sorted(fr.items(), key=lambda x: x[1]['fire'] + x[1]['resolve'], reverse=True):
-        if v['fire'] > 1 and v['resolve'] > 0:
-            name = re.sub(r'\[[^\]]+\]', '', k).strip()
-            name = re.sub(r'\s+', ' ', name).strip()
-            flapping.append({
-                'name':     name[:65],
-                'fires':    v['fire'],
-                'resolves': v['resolve'],
-                'density':  min(0.95, v['fire'] / max(v['fire'] + v['resolve'], 1)),
-                'type':     _classify(k),
-            })
-    flapping = flapping[:6]
-
-    # ── Duration & time labels ────────────────────────────────────
-    if t0 and t1:
-        delta  = t1 - t0
-        total_h = int(delta.total_seconds() // 3600)
-        total_m = int((delta.total_seconds() % 3600) // 60)
-        dur    = f"{total_h}h {total_m}min" if total_h else f"{total_m} minutes"
-        span_h = delta.total_seconds() / 3600
-        step_m = 180 if span_h > 12 else (60 if span_h > 6 else 30)
-        labels = []
-        cur = t0
-        while cur <= t1 and len(labels) < 9:
-            labels.append(cur.strftime('%Y-%m-%d %H:%M'))
-            cur += timedelta(minutes=step_m)
-        if not labels or labels[-1] != t1.strftime('%Y-%m-%d %H:%M'):
-            labels.append(t1.strftime('%Y-%m-%d %H:%M'))
-    else:
-        dur = "unknown"; labels = []
-
-    # ── Sample series helper ──────────────────────────────────────
-    def _sample(series, n=8):
-        if not series: return []
-        step = max(1, len(series) // n)
-        pts  = series[::step][:n]
-        return [{'label': dt.strftime('%H:%M'), 'value': round(v, 1)} for dt, v in pts]
-
-    # ── Team mapping ──────────────────────────────────────────────
-    team_map = defaultdict(set)
-    for a in alerts:
-        s = a['subject']
-        t = _classify(s)
-        if 'DevOps'    in s: team_map['DevOps'].add(t)
-        if 'IT Ops'    in s: team_map['IT Ops'].add(t)
-        if 'DBA'       in s: team_map['DBA Team'].add(t)
-        if 'Developer' in s: team_map['Developers'].add(t)
-
-    # ── Top offenders ─────────────────────────────────────────────
-    top_offenders = [
-        {
-            'host': h,
-            'alert_types': sorted(host_types.get(h, {'?'}))[:3],
-            'count': c,
-        }
-        for h, c in hosts.most_common(6)
-    ]
-
-    return {
-        'total': total, 'firing': firing, 'resolved': resolved,
-        'type_counts': dict(type_counts),
-        'hosts': dict(hosts.most_common(8)),
-        'host_types': {k: list(v) for k, v in host_types.items()},
-        'kafka_max_lag': max((v for _, v in kafka_series), default=0),
-        'kafka_min_lag': min((v for _, v in kafka_series), default=0),
-        'kafka_series':  _sample(kafka_series),
-        'cpu_max':       max((v for _, v in cpu_series), default=0),
-        'cpu_series':    _sample(cpu_series),
-        'critical_disk': critical_disk,   # {host: pct}
-        'redis_nodes':   redis_nodes,     # {node: hit_rate}
-        'mongo_connections': mongo_connections,
-        'dns_projects':  list(dns_projects)[:4],
-        'http_hosts':    list(http_hosts)[:4],
-        'flapping':      flapping,
-        'top_offenders': top_offenders,
-        'time_start':    t0.strftime('%Y-%m-%d %H:%M') if t0 else '',
-        'time_end':      t1.strftime('%Y-%m-%d %H:%M') if t1 else '',
-        'date_start':    t0.date().isoformat() if t0 else '',
-        'date_end':      t1.date().isoformat() if t1 else '',
-        'duration':      dur,
-        'time_labels':   labels,
-        'team_map':      {k: list(v) for k, v in team_map.items()},
-    }
+    blocks = re.split(r'\n\s*\n', raw)
+    chunks, current = [], ""
+    for block in blocks:
+        if len(current) + len(block) > max_chunk_chars and current:
+            chunks.append(current.strip())
+            current = block
+        else:
+            current += "\n\n" + block
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks or [raw[:max_chunk_chars]]
 
 
 # ══════════════════════════════════════════════════════════════════
-#  LLM PROMPT: NARRATIVE PLANNER
-#  Given exact parsed facts → design 12 bespoke slide stories
+#  LLM ANALYZER PROMPT
+#  The LLM reads raw text and produces a structured understanding.
+#  This replaces all regex parsing — works for any content type.
 # ══════════════════════════════════════════════════════════════════
 
-PLANNER_PROMPT = """You are an elite SRE presentation architect at a top tech company.
-You have been given EXACT pre-parsed infrastructure alert data.
-Design a {n_slides}-slide executive PDF report that tells a COMPELLING, SPECIFIC story.
+ANALYZER_PROMPT = """You are a content analysis expert. Read the following input carefully and produce a structured analysis.
 
-STYLE TARGET: Match the quality of NotebookLM reports — each slide must have:
-  - A unique, journalistic TITLE (not generic like "Alert Overview")
-  - A specific INSIGHT that would surprise or inform an executive
-  - A visual that BEST SHOWS that specific insight (not just "a chart")
-  - Data from the parsed facts (exact numbers, real hostnames, real timestamps)
+INPUT TEXT (this may be a sample of a larger document):
+{text_sample}
+
+TOTAL INPUT SIZE: {total_chars} characters across {chunk_count} sections.
+
+Your job: Understand what this content is about and extract structured facts for a presentation designer.
+
+Determine ALL of the following:
+
+1. content_type: What kind of content is this?
+   Examples: "infrastructure_alerts", "application_logs", "technical_topic", "educational_content",
+   "business_report", "research_paper", "how_to_guide", "product_documentation",
+   "incident_report", "performance_metrics", "general_knowledge_request", etc.
+
+2. subject: What is this about? (2-3 sentence summary)
+
+3. report_title: A compelling, specific title for a PDF report about this content.
+
+4. report_subtitle: A professional subtitle.
+
+5. audience: Who would read a report about this? (e.g. "SRE Leadership", "Engineering Team",
+   "Students", "Business Executives", "General Audience")
+
+6. key_entities: Important names, systems, metrics, hosts, tools, concepts found in the data (up to 15).
+
+7. key_facts: The most important findings — quantitative OR qualitative (up to 20).
+   For data-rich input: extract exact numbers, percentages, counts, timestamps.
+   For topic/question input: generate the key facts from your own knowledge about the subject.
+
+8. themes: 4-8 major themes/categories that presentation slides could be organized around.
+   Each theme should be a distinct angle worth a slide or two.
+
+9. tone: What tone should the report use?
+   "urgent" — critical issues, immediate action needed
+   "analytical" — deep technical analysis
+   "educational" — teaching/explaining concepts
+   "executive_summary" — high-level business view
+   "informational" — neutral, balanced overview
+
+10. data_richness: How much concrete data is in the input?
+    "high" — lots of numbers, metrics, timestamps, specific data points
+    "medium" — some data points mixed with narrative
+    "low" — mostly conceptual, topic-based, or a question. YOU must enrich with your own knowledge.
+
+CRITICAL RULE for data_richness="low":
+If the input is a topic or question (like "tell me about Kubernetes" or "explain machine learning"),
+you MUST populate key_facts with REAL, ACCURATE facts from your own knowledge. Include real numbers,
+real architecture details, real comparisons — as if you were an expert writing a reference document.
+
+Return ONLY valid JSON (no markdown, no fences):
+{{
+  "content_type": "...",
+  "subject": "...",
+  "report_title": "...",
+  "report_subtitle": "...",
+  "audience": "...",
+  "key_entities": ["entity1", "entity2", "..."],
+  "key_facts": [
+    {{"fact": "Concrete fact or data point", "category": "theme it belongs to", "importance": "high"}},
+    {{"fact": "Another fact", "category": "...", "importance": "medium"}},
+    ...
+  ],
+  "themes": ["Theme 1", "Theme 2", "Theme 3", "..."],
+  "tone": "analytical",
+  "data_richness": "high"
+}}"""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LLM PLANNER PROMPT — UNIVERSAL
+#  Works for any content type: alerts, logs, topics, docs, etc.
+# ══════════════════════════════════════════════════════════════════
+
+PLANNER_PROMPT = """You are an expert presentation architect who creates NotebookLM-quality slide decks.
+You have been given a structured analysis of source content.
+Design a {n_slides}-slide PDF report that tells a COMPELLING, SPECIFIC story.
+
+CONTENT ANALYSIS:
+{analysis}
+
+RAW SOURCE EXCERPT (for additional context and exact quotes):
+{raw_excerpt}
+
+STYLE TARGET: Match NotebookLM quality — each slide must have:
+  - A unique, journalistic TITLE (not generic like "Overview" or "Introduction")
+  - A specific INSIGHT that would surprise or inform the reader
+  - A visual that BEST SHOWS that specific insight
+  - Real data, real names, real numbers (from the analysis or from your own knowledge)
 
 VISUAL TYPES you can use (pick the best fit per slide):
-  - big_number_hero      : huge single stat + context (e.g. "785,744 messages")
+  - cover_hero           : large title + 3 preview cards (for slide 1 only)
+  - big_number_hero      : huge single stat + context
   - bar_chart_annotated  : bar chart with threshold lines and callouts
   - area_chart_gradient  : area/line chart showing trends over time
-  - funnel_diagram       : alert storm → categories → root causes
-  - topology_map         : system topology with colored severity dots
-  - matrix_table         : teams × impact grid
-  - flap_chart           : firing/resolved cycle visualization with actual threshold line
-  - domino_chain         : cascading failure cards with arrows
+  - funnel_diagram       : multi-stage breakdown or flow
+  - topology_map         : system/concept topology with colored nodes
+  - matrix_table         : comparison grid (e.g. teams x impact, features x products)
+  - flap_chart           : oscillation/cycle visualization
+  - domino_chain         : cascading cause-effect cards with arrows
   - comparison_panel     : side-by-side comparison panels
-  - priority_table       : action table with system, fix, tuning columns
-  - scatter_quadrant     : risk (y) vs frequency (x) quadrant chart
-  - stat_cards_row       : 4 metric cards in a row
-  - timeline_events      : horizontal timeline of key events
-  - cover_hero           : large title + 3 preview cards (for slide 1 only)
+  - priority_table       : action table with categorized columns
+  - scatter_quadrant     : 2x2 quadrant analysis
+  - stat_cards_row       : 4 metric/concept cards in a row
+  - timeline_events      : horizontal timeline of key events or milestones
+  - concept_diagram      : visual explanation of architecture or workflow
+  - info_cards_grid      : grid of information cards with icons
 
 LAYOUT OPTIONS:
   - centered             : visual in center, short context below
@@ -296,50 +164,44 @@ LAYOUT OPTIONS:
   - two_panel            : two equal panels side by side
   - header_plus_grid     : heading + grid of cards/items below
 
-COLOR MOODS (use consistently per slide):
+COLOR MOODS:
   - critical_red   : #C0392B accent — urgent, broken, immediate action
   - warning_amber  : #D4880E accent — degraded, at-risk, watch closely
-  - info_blue      : #2471A3 accent — informational, monitoring, context
-  - neutral        : #555555 accent — conclusion, recommendations, summary
-
-EXACT PARSED FACTS:
-{facts}
+  - info_blue      : #2471A3 accent — informational, educational, context
+  - neutral        : #555555 accent — conclusion, summary, recommendations
+  - success_green  : #1E8449 accent — positive, achievements, solutions
 
 RULES:
-1. Slide 1 MUST be a cover with date range and 3 preview-card highlights
-2. Final slide MUST be action-oriented recommendations
-3. Each slide must use DIFFERENT visual_type — no two slides the same
-4. Use EXACT numbers from the facts — never make up values
-5. Titles must be SPECIFIC like "Kafka Backlog: 785K Messages" not "Queue Issues"
-6. visual_description must be detailed enough for an LLM to draw it from scratch
-7. Include the actual data values needed in the "data" field for each slide
-8. Every slide must have a clear story_angle — WHY does this slide matter?
+1. Slide 1 MUST be a cover slide that sets the stage with title + 3 preview highlights
+2. Final slide MUST be a conclusion/recommendations/key-takeaways slide
+3. Each slide should use a DIFFERENT visual_type — variety keeps it engaging
+4. If the content analysis has data_richness="high", use EXACT numbers from key_facts
+5. If data_richness="low", use YOUR OWN KNOWLEDGE to create rich, accurate content.
+   Include real facts, real numbers, real architecture details — not placeholder text.
+6. Titles must be SPECIFIC and journalistic, not generic
+7. visual_description must be detailed enough for another LLM to draw it from scratch
+8. Include the actual data values needed in the "data" field for each slide
+9. Every slide must have a clear story_angle — WHY does this slide matter?
+10. The "data" field should contain all values the visual designer needs to render the slide
 
 Return ONLY valid JSON (no markdown, no fences):
 {{
-  "report_title": "Specific report title with dates",
-  "report_subtitle": "Executive SRE Diagnostic Report",
-  "environment": "RIL Core Infrastructure",
-  "audience": "SRE / Engineering Leadership",
+  "report_title": "{report_title}",
+  "report_subtitle": "{report_subtitle}",
+  "audience": "{audience}",
   "slides": [
     {{
       "slot": 1,
-      "title": "Observability Diagnostics: March 23-24 System Telemetry Review",
-      "subtitle": "Separating Signal from Noise in Enterprise Infrastructure",
-      "story_angle": "Cover slide: set the stage with 3 key preview insights",
-      "key_insight": "342 alerts condensed to 6 actionable root causes",
+      "title": "Compelling specific title",
+      "subtitle": "Contextual subtitle",
+      "story_angle": "Why this slide matters",
+      "key_insight": "The one thing the reader should take away",
       "visual_type": "cover_hero",
-      "visual_description": "Three preview cards showing: (1) Kafka 785K lag backlog diagram, (2) Storage 99.9% critical bar, (3) flapping 80% threshold chart. Date badge at top center. Title large bold. Subtitle line. Three target badges at bottom.",
+      "visual_description": "Detailed description of what to render visually",
       "layout_hint": "centered",
       "color_mood": "neutral",
       "data": {{
-        "date_range": "March 23-24, 2026",
-        "total_alerts": 342,
-        "preview_items": [
-          {{"label": "System Telemetry Review", "sub": "Key metrics and system performance indicators"}},
-          {{"label": "Alert Tuning & Noise Reduction", "sub": "Optimize critical thresholds, separate incidents from noise"}},
-          {{"label": "Resource Exhaustion Analysis", "sub": "Identify infrastructure health, bottlenecks, capacity limits"}}
-        ]
+        "relevant_key": "relevant_value"
       }}
     }},
     ... (continue for all {n_slides} slides)
@@ -348,55 +210,172 @@ Return ONLY valid JSON (no markdown, no fences):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  FALLBACK PLAN — generic, works for any content
+# ══════════════════════════════════════════════════════════════════
+
+def _fallback_plan(analysis: dict) -> dict:
+    """Build a minimal plan from the analysis when the planner LLM fails."""
+    themes = analysis.get('themes', ['Overview', 'Details', 'Analysis'])
+    facts  = analysis.get('key_facts', [])
+    title  = analysis.get('report_title', 'Report')
+    subtitle = analysis.get('report_subtitle', 'Generated Report')
+
+    slides = [
+        {
+            'slot': 1,
+            'title': title,
+            'subtitle': subtitle,
+            'story_angle': 'Cover slide: set the stage',
+            'key_insight': analysis.get('subject', 'Comprehensive analysis'),
+            'visual_type': 'cover_hero',
+            'layout_hint': 'centered',
+            'color_mood': 'neutral',
+            'visual_description': f'Cover with title "{title}", subtitle, and 3 preview cards for top themes.',
+            'data': {
+                'title': title,
+                'subtitle': subtitle,
+                'preview_items': [
+                    {'label': t, 'sub': 'Key topic'} for t in themes[:3]
+                ],
+            },
+        },
+        {
+            'slot': 2,
+            'title': 'Executive Summary',
+            'subtitle': '',
+            'story_angle': 'Key metrics and findings at a glance',
+            'key_insight': analysis.get('subject', ''),
+            'visual_type': 'stat_cards_row',
+            'layout_hint': 'full_visual',
+            'color_mood': 'info_blue',
+            'visual_description': 'Four stat cards showing the most important facts or concepts.',
+            'data': {
+                'cards': [
+                    {'label': f.get('fact', '')[:60], 'category': f.get('category', '')}
+                    for f in facts[:4]
+                ] if facts else [{'label': 'See analysis', 'category': 'Overview'}],
+            },
+        },
+    ]
+
+    visual_types = ['bar_chart_annotated', 'comparison_panel', 'info_cards_grid',
+                    'timeline_events', 'topology_map', 'matrix_table']
+
+    for i, theme in enumerate(themes[:6], 3):
+        theme_facts = [f for f in facts if f.get('category', '').lower() == theme.lower()]
+        if not theme_facts:
+            theme_facts = facts[min(i-3, len(facts)-1):min(i-3+3, len(facts))] if facts else []
+
+        slides.append({
+            'slot': i,
+            'title': f'Deep Dive: {theme}',
+            'subtitle': '',
+            'story_angle': f'Detailed analysis of {theme}',
+            'key_insight': theme_facts[0].get('fact', f'Analysis of {theme}') if theme_facts else f'Analysis of {theme}',
+            'visual_type': visual_types[(i - 3) % len(visual_types)],
+            'layout_hint': 'left_text_right_visual',
+            'color_mood': ['info_blue', 'warning_amber', 'neutral', 'critical_red', 'success_green', 'info_blue'][(i - 3) % 6],
+            'visual_description': f'Visual showing key aspects of {theme} with real data.',
+            'data': {
+                'theme': theme,
+                'facts': [f.get('fact', '') for f in theme_facts[:5]],
+            },
+        })
+
+    slides.append({
+        'slot': len(slides) + 1,
+        'title': 'Key Takeaways & Recommendations',
+        'subtitle': '',
+        'story_angle': 'Actionable conclusions',
+        'key_insight': 'Summary of findings and next steps',
+        'visual_type': 'priority_table',
+        'layout_hint': 'full_visual',
+        'color_mood': 'neutral',
+        'visual_description': 'Table with key findings, recommendations, and action items.',
+        'data': {
+            'themes': themes[:6],
+            'top_facts': [f.get('fact', '') for f in facts[:5]] if facts else [],
+        },
+    })
+
+    return {
+        'report_title': title,
+        'report_subtitle': subtitle,
+        'audience': analysis.get('audience', 'General'),
+        'slides': slides,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
 #  PUBLIC API
 # ══════════════════════════════════════════════════════════════════
 
 def run(raw_data: str) -> dict:
-    print("  [Planner] Step 1/2: Python parsing every alert block...")
-    p = _parse_raw(raw_data)
-    if not p:
-        print("  [Planner] WARNING: No alerts parsed — check input format")
+    """Analyze any content and plan slides. No format assumptions."""
+
+    # Step 1: Chunk the input (format-agnostic)
+    chunks = _chunk_text(raw_data)
+    if not chunks:
+        print("  [Planner] WARNING: Empty input")
         return {}
 
-    print(f"    {p['total']} alerts | {len(p['type_counts'])} types | span: {p['duration']}")
-    print(f"    flapping: {len(p['flapping'])} | critical disk: {list(p['critical_disk'].keys())}")
-    print(f"    kafka lag: {p['kafka_min_lag']:,} → {p['kafka_max_lag']:,} | cpu_max: {p['cpu_max']}%")
+    total_chars = len(raw_data)
+    # Build a representative sample: first chunks + last chunk for variety
+    if len(chunks) <= 3:
+        sample = "\n\n---\n\n".join(chunks)
+    else:
+        sample = "\n\n---\n\n".join(chunks[:2] + [chunks[len(chunks)//2]] + [chunks[-1]])
+    sample = sample[:config.MAX_DATA_CHARS]
 
-    # Build compact facts JSON for the LLM (only numbers and strings, no raw text)
-    facts = json.dumps({
-        'total_alerts':         p['total'],
-        'firing':               p['firing'],
-        'resolved':             p['resolved'],
-        'duration':             p['duration'],
-        'time_start':           p['time_start'],
-        'time_end':             p['time_end'],
-        'alert_type_counts':    p['type_counts'],
-        'top_6_hosts_by_count': dict(list(p['hosts'].items())[:6]),
-        'kafka_lag_min':        p['kafka_min_lag'],
-        'kafka_lag_max':        p['kafka_max_lag'],
-        'kafka_series':         p['kafka_series'],
-        'cpu_max_pct':          p['cpu_max'],
-        'cpu_series':           p['cpu_series'],
-        'disk_utilization':     p['critical_disk'],
-        'redis_hit_rates':      p['redis_nodes'],
-        'mongo_connections':    p['mongo_connections'],
-        'dns_projects':         p['dns_projects'],
-        'http_problem_hosts':   p['http_hosts'],
-        'flapping_top6':        [
-            {'name': f['name'], 'fires': f['fires'], 'resolves': f['resolves'], 'type': f['type']}
-            for f in p['flapping']
-        ],
-        'top_offenders':        p['top_offenders'],
-        'teams_affected':       p['team_map'],
-        'time_labels':          p['time_labels'],
-    }, indent=2)[:4000]
+    # Step 2: LLM Analyzer — understands the content
+    print("  [Planner] Step 1/3: LLM analyzing content...")
+    try:
+        analysis = call_json(
+            ANALYZER_PROMPT.format(
+                text_sample=sample[:6000],
+                total_chars=total_chars,
+                chunk_count=len(chunks),
+            ),
+            key="analyzer",
+            max_tokens=3000,
+        )
+    except Exception as e:
+        print(f"    [Analyzer] LLM failed: {e}")
+        analysis = {
+            "content_type": "unknown",
+            "subject": raw_data[:200],
+            "report_title": "Content Analysis Report",
+            "report_subtitle": "Auto-Generated Report",
+            "audience": "General",
+            "key_entities": [],
+            "key_facts": [],
+            "themes": ["Overview", "Details", "Summary"],
+            "tone": "informational",
+            "data_richness": "low",
+        }
 
-    print("  [Planner] Step 2/2: LLM designing slide narratives...")
+    ct = analysis.get('content_type', 'unknown')
+    dr = analysis.get('data_richness', 'unknown')
+    n_facts = len(analysis.get('key_facts', []))
+    n_themes = len(analysis.get('themes', []))
+    print(f"    Content type: {ct} | Data richness: {dr}")
+    print(f"    {n_facts} facts extracted | {n_themes} themes identified")
+    print(f"    Subject: {analysis.get('subject', '')[:80]}")
+
+    # Step 3: LLM Planner — designs the slide narrative
+    print("  [Planner] Step 2/3: LLM designing slide narratives...")
     try:
         plan = call_json(
-            PLANNER_PROMPT.format(facts=facts, n_slides=config.N_SLIDES),
+            PLANNER_PROMPT.format(
+                analysis=json.dumps(analysis, indent=2)[:5000],
+                raw_excerpt=sample[:2500],
+                n_slides=config.N_SLIDES,
+                report_title=analysis.get('report_title', 'Report'),
+                report_subtitle=analysis.get('report_subtitle', 'Generated Report'),
+                audience=analysis.get('audience', 'General'),
+            ),
             key="planner",
-            max_tokens=8000
+            max_tokens=8000,
         )
     except Exception as e:
         print(f"    [Planner] LLM failed: {e}")
@@ -404,64 +383,11 @@ def run(raw_data: str) -> dict:
 
     if not plan.get('slides'):
         print("    [Planner] Warning: LLM returned no slides — building fallback plan")
-        plan = _fallback_plan(p)
+        plan = _fallback_plan(analysis)
 
-    # Attach parsed data to the plan so agents 2+3 can access raw values
-    plan['_parsed'] = p
-    plan['_facts_json'] = facts
+    # Attach analysis to the plan so downstream agents can use it
+    plan['_analysis'] = analysis
+    plan['_raw_sample'] = sample[:2000]
     n = len(plan.get('slides', []))
     print(f"  [Planner] Done — {n} slides planned")
     return plan
-
-
-def _fallback_plan(p: dict) -> dict:
-    """Minimal fallback if LLM completely fails."""
-    tc = p['type_counts']
-    top3 = sorted(tc.items(), key=lambda x: -x[1])[:3]
-    slides = [
-        {
-            'slot': 1, 'title': f"Infrastructure Alert Analysis: {p['date_start']} to {p['date_end']}",
-            'subtitle': 'Executive SRE Diagnostic Report',
-            'story_angle': 'Cover', 'key_insight': f"{p['total']} alerts over {p['duration']}",
-            'visual_type': 'cover_hero', 'layout_hint': 'centered', 'color_mood': 'neutral',
-            'visual_description': 'Cover with title, date, and key stats',
-            'data': {'total': p['total'], 'duration': p['duration'],
-                     'time_start': p['time_start'], 'time_end': p['time_end']},
-        },
-        {
-            'slot': 2, 'title': 'Executive Snapshot: Alert Volume',
-            'subtitle': '', 'story_angle': 'Key metrics at a glance',
-            'key_insight': f"{p['firing']} still firing, {p['resolved']} resolved",
-            'visual_type': 'stat_cards_row', 'layout_hint': 'full_visual', 'color_mood': 'critical_red',
-            'visual_description': '4 stat cards: total, firing, kafka lag, cpu max',
-            'data': {'total': p['total'], 'firing': p['firing'], 'resolved': p['resolved'],
-                     'kafka_max': p['kafka_max_lag'], 'cpu_max': p['cpu_max']},
-        },
-    ]
-    for i, (itype, cnt) in enumerate(top3, 3):
-        slides.append({
-            'slot': i, 'title': f"Deep Dive: {itype}",
-            'subtitle': '', 'story_angle': f"Analysis of {itype}",
-            'key_insight': f"{cnt} alerts ({round(cnt/p['total']*100)}% of total)",
-            'visual_type': 'bar_chart_annotated', 'layout_hint': 'left_text_right_visual',
-            'color_mood': ['critical_red','warning_amber','info_blue'][i-3],
-            'visual_description': f"Bar chart showing {itype} alert count over time",
-            'data': {'name': itype, 'count': cnt},
-        })
-
-    slides.append({
-        'slot': len(slides)+1, 'title': 'Recommendations & Next Steps',
-        'subtitle': '', 'story_angle': 'Actionable fixes',
-        'key_insight': 'Three priority actions to reduce alert noise',
-        'visual_type': 'priority_table', 'layout_hint': 'full_visual', 'color_mood': 'neutral',
-        'visual_description': 'Table with system, fix, tune columns',
-        'data': {'top_issues': [t for t, _ in top3]},
-    })
-
-    return {
-        'report_title': f"Infrastructure Alert Analysis: {p['date_start']} to {p['date_end']}",
-        'report_subtitle': 'Executive SRE Diagnostic Report',
-        'environment': 'Core Infrastructure',
-        'audience': 'SRE / Engineering Leadership',
-        'slides': slides,
-    }

@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-# orchestrator.py  —  4-Agent Dynamic PDF Pipeline
+# orchestrator.py  —  Universal PDF Pipeline (NotebookLM-style)
 #
 # Flow:
-#   Raw data (.txt/.csv/.pdf)
-#     → [Agent 1: Planner]   Python parse + LLM designs 12 slide stories   → plan.json
+#   Any input (.txt/.csv/.pdf)
+#     → [Agent 0: Analyzer]  LLM understands content (any format)            → analysis
+#     → [Agent 1: Planner]   LLM designs N slide stories from analysis       → plan.json
 #     → [Agent 2: Designer]  LLM generates full HTML+SVG per slide           → slides list
 #     → [Agent 3: Assembler] Merges slides into one print-ready HTML         → report.html
 #     → [Agent 4: Critic]    Scores HTML → feedback                          → critic.json
 #     → if score ≥ threshold → export PDF
 #     → if score <  threshold → Designer re-renders only broken slides → loop
 #
+# Works with: alerts, logs, topics, questions, CSV data, documents, etc.
+#
 # Usage:
 #   python orchestrator.py --input alerts.txt
-#   python orchestrator.py --input alerts.txt --output output/report.pdf
-#   python orchestrator.py --input alerts.txt --html-only --iterations 5
+#   python orchestrator.py --input topic.txt --output output/report.pdf
+#   python orchestrator.py --input data.csv --html-only --iterations 5
 
 import argparse, asyncio, json, os, sys
 from datetime import datetime
@@ -72,28 +75,15 @@ def load(path: str) -> str:
             log("   [red]No PDF library found. Install: pip install pdfplumber[/red]")
             sys.exit(1)
 
-    # CSV input
+    # CSV input — pass as text, LLM analyzer will understand it
     if ext == '.csv':
         try:
             import pandas as pd
             df = pd.read_csv(path)
             log(f"   {len(df)} rows × {len(df.columns)} columns")
-            # Convert CSV to alert-block format if it has the right columns
-            cols = [c.lower() for c in df.columns]
-            if 'subject' in cols and 'status' in cols:
-                # Looks like alert data — convert to block format
-                blocks = []
-                for _, row in df.iterrows():
-                    block = "========== ALERT ==========\n"
-                    for col in df.columns:
-                        block += f"{col}: {row[col]}\n"
-                    blocks.append(block)
-                raw = "\n".join(blocks)
-                log(f"   Converted {len(df)} rows to alert blocks")
-                return raw[:config.MAX_DATA_CHARS]
-            else:
-                raw = f"CSV data — columns: {list(df.columns)}\n\n{df.to_string(index=False)}"
-                return raw[:config.MAX_DATA_CHARS]
+            raw = f"CSV data with {len(df)} rows and columns: {list(df.columns)}\n\n"
+            raw += df.to_string(index=False)
+            return raw[:config.MAX_DATA_CHARS]
         except ImportError:
             pass
 
@@ -194,7 +184,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     stem = Path(output_path).stem
     ts   = datetime.now().strftime("%H:%M:%S")
 
-    rule(f"🚀  4-Agent Dynamic PDF Pipeline  [{ts}]")
+    rule(f"🚀  Universal PDF Pipeline  [{ts}]")
     log(f"  Input:      [cyan]{input_path}[/cyan]")
     log(f"  Output:     [cyan]{output_path}[/cyan]")
     log(f"  Style:      [cyan]{config.VISUAL_STYLE}[/cyan]")
@@ -208,8 +198,8 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     from agents.assembler import run as assemble_html
     from agents.critic    import run as critique
 
-    # ── AGENT 1: Narrative Planner ────────────────────────────────
-    rule("Agent 1 / 4 — Narrative Planner")
+    # ── AGENTS 0+1: Analyzer + Planner ────────────────────────────
+    rule("Agent 0+1 — Content Analyzer + Narrative Planner")
     raw_data = load(input_path)
     plan = plan_slides(raw_data)
 
@@ -219,7 +209,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
 
     # Save plan
     plan_path = str(out_dir / f"{stem}_plan.json")
-    plan_no_parsed = {k: v for k, v in plan.items() if k not in ('_parsed', '_facts_json')}
+    plan_no_parsed = {k: v for k, v in plan.items() if not k.startswith('_')}
     with open(plan_path, 'w') as f:
         json.dump(plan_no_parsed, f, indent=2, default=str)
     log(f"  💾 Plan saved: [dim]{plan_path}[/dim]")
@@ -336,15 +326,15 @@ def run(input_path: str, output_path: str, html_only: bool = False):
 # ══════════════════════════════════════════════════════════════════
 
 def main():
-    p = argparse.ArgumentParser(description="4-Agent Dynamic PDF Pipeline")
-    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf)")
+    p = argparse.ArgumentParser(description="Universal PDF Pipeline (NotebookLM-style)")
+    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf) — any content")
     p.add_argument("--output",     default="output/report.pdf")
     p.add_argument("--iterations", type=int,   default=config.MAX_ITERATIONS)
     p.add_argument("--threshold",  type=float, default=config.PASS_THRESHOLD)
     p.add_argument("--html-only",  action="store_true")
     p.add_argument("--style",      default=config.VISUAL_STYLE,
-                   choices=["notebooklm", "modern"],
-                   help="Visual style")
+                   choices=["notebooklm", "modern", "auto"],
+                   help="Visual style (auto = LLM chooses based on content tone)")
     args = p.parse_args()
 
     config.MAX_ITERATIONS = args.iterations
