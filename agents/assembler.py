@@ -4,24 +4,20 @@
 # ═════════════════════════
 # Merges all slide HTML snippets into one complete print-ready HTML file.
 #
-# CDN STRATEGY (all work in Playwright offline mode):
-#   • Tailwind: play.tailwindcss.com  — runtime JIT, all classes available
-#   • Chart.js: cdnjs.cloudflare.com  — stable offline-friendly CDN
-#   • Lucide:   unpkg.com/lucide      — SVG icon library, no network icons
+# CDN STRATEGY:
+#   • Tailwind: cdn.tailwindcss.com (runtime JIT — all classes including arbitrary values)
+#   • Chart.js:  cdnjs.cloudflare.com (stable, offline-friendly)
+#   • Fonts:     Google Fonts (Inter for body, Playfair Display for editorial headings)
+#   • Icons:     NONE — all icons are inline SVG from utils/icons.py
 #
 # KEY DESIGN DECISIONS:
-#   1. Tailwind loaded via play.tailwindcss.com — no config needed, all
-#      arbitrary values (h-[380px], bg-[#C0392B]) work out of the box.
-#   2. Chart.js animation globally disabled via Chart.defaults before
-#      any slide scripts run — guarantees PDF snapshot catches all charts.
-#   3. Lucide.createIcons() called after DOMContentLoaded to render all
-#      <i data-lucide="..."> elements into inline SVGs.
-#   4. window.__chartsReady counter: each chart increments it on creation.
-#      Playwright waits for this to equal the total chart count.
-#   5. CSS scopes: .slide has overflow:hidden and fixed 1280x720 dimensions.
-#      Tailwind's h-full on slide content fills exactly that space.
-#   6. Print CSS: each .slide gets page-break-after:always so each slide
-#      prints as one A-landscape PDF page.
+#   1. Icons are inline SVG — zero CDN icon dependency, 100% PDF render success.
+#   2. Chart.js animation globally disabled via Chart.defaults before any slides run.
+#   3. window.__chartsReady counter: each chart increments it after creation.
+#      Playwright waits for this count before PDF capture.
+#   4. Each .slide is exactly 1280×720px. overflow:hidden prevents bleed.
+#   5. CSS @media print: page-break-after:always per slide = one PDF page each.
+#   6. Tailwind arbitrary values (h-[380px], bg-[#C0392B]) work via CDN runtime.
 
 import re, sys
 from pathlib import Path
@@ -32,58 +28,53 @@ from agents.designer import _get_style
 
 
 # ══════════════════════════════════════════════════════════════════
-#  COUNT CHARTS IN SLIDE HTML
-#  (so Playwright knows how many __chartsReady increments to wait for)
+#  COUNT CHART.JS INSTANCES
 # ══════════════════════════════════════════════════════════════════
 
 def _count_charts(slides_html: list) -> int:
-    total = 0
-    for _, html in slides_html:
-        if html:
-            total += html.lower().count('new chart(')
-    return total
+    return sum(
+        html.lower().count('new chart(')
+        for _, html in slides_html
+        if html
+    )
 
 
 # ══════════════════════════════════════════════════════════════════
-#  GLOBAL CSS
-#  Only structural rules — all visual styling is Tailwind in each slide.
+#  CSS — structural only; visual styling is per-slide via Tailwind
 # ══════════════════════════════════════════════════════════════════
 
 def _build_global_css(style: dict) -> str:
-    bg     = style.get('bg', '#F5F0E8')
-    card   = style.get('card', '#FFFFFF')
-    text   = style.get('text', '#1A1A1A')
-    muted  = style.get('muted', '#666666')
+    bg     = style.get('bg',     '#F5F0E8')
+    muted  = style.get('muted',  '#666666')
+    blue   = style.get('blue',   '#2471A3')
     border = style.get('border', '#D0CEC8')
-    red    = style.get('red', '#C0392B')
-    amber  = style.get('amber', '#D4880E')
-    blue   = style.get('blue', '#2471A3')
-    green  = style.get('green', '#1E8449')
+    family = style.get('family', 'warm')
+
+    # Shell background: complementary to slide palette
+    shell_bg = {
+        'warm': '#9A9080',
+        'cool': '#7A8898',
+        'dark': '#050810',
+    }.get(family, '#8A8880')
 
     return f"""
-/* ── CSS custom properties (available to all slide content) ─────── */
 :root {{
   --bg:     {bg};
-  --card:   {card};
-  --text:   {text};
   --muted:  {muted};
-  --border: {border};
-  --red:    {red};
-  --amber:  {amber};
   --blue:   {blue};
-  --green:  {green};
+  --border: {border};
 }}
 
-/* ── Page shell ─────────────────────────────────────────────────── */
 *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 html, body {{ height: 100%; }}
+
 body {{
-  background: #B0AAA0;
+  background: {shell_bg};
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 24px;
-  padding: 28px 12px;
+  gap: 28px;
+  padding: 32px 16px;
   font-family: 'Inter', sans-serif;
 }}
 
@@ -92,75 +83,85 @@ body {{
   width:  1280px;
   height: 720px;
   position: relative;
-  overflow: hidden;
+  overflow: hidden;          /* hard clip — nothing bleeds out */
   flex-shrink: 0;
-  box-shadow: 0 10px 40px rgba(0,0,0,0.25);
-  /* background set per-slide by LLM content */
+  box-shadow: 0 16px 48px rgba(0,0,0,0.35), 0 4px 12px rgba(0,0,0,0.2);
+  border-radius: 2px;
 }}
 
-/* ── Slide decorations (badge + brand — always on top) ─────────── */
+/* Slide inner content must never exceed 720px */
+.slide > *:first-child {{
+  height: 100%;
+  width:  100%;
+  max-height: 720px;
+  overflow: hidden;          /* belt-and-suspenders: inner wrapper also clips */
+  box-sizing: border-box;
+}}
+
+/* ── Slide number badge ──────────────────────────────────────── */
 .slide-num {{
   position: absolute;
-  top: 16px;
-  left: 24px;
-  font-size: 10px;
-  font-family: 'JetBrains Mono', monospace;
+  top: 14px;
+  left: 20px;
+  font-size: 9px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
   color: {muted};
-  letter-spacing: 2px;
-  opacity: 0.55;
+  letter-spacing: 2.5px;
+  opacity: 0.45;
   z-index: 50;
   pointer-events: none;
+  text-transform: uppercase;
 }}
+
+/* ── Brand footer ────────────────────────────────────────────── */
 .slide-brand {{
   position: absolute;
-  bottom: 12px;
-  right: 22px;
-  font-size: 10px;
-  font-family: 'JetBrains Mono', monospace;
+  bottom: 11px;
+  right: 20px;
+  font-size: 9px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
   color: {muted};
-  opacity: 0.5;
+  opacity: 0.4;
   z-index: 50;
   pointer-events: none;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }}
 
-/* ── Navigation overlay (browser preview only) ──────────────────── */
-.nav-overlay {{
+/* ── Nav overlay (browser preview only) ─────────────────────── */
+#nav-overlay {{
   position: fixed;
-  bottom: 16px;
-  right: 16px;
-  background: rgba(0,0,0,0.75);
+  bottom: 14px;
+  right: 14px;
+  background: rgba(0,0,0,0.72);
   color: #fff;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
+  padding: 5px 10px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-family: monospace;
   z-index: 200;
   pointer-events: none;
 }}
+
+/* ── Print button ────────────────────────────────────────────── */
 .print-btn {{
   position: fixed;
-  top: 14px;
-  left: 14px;
+  top: 12px;
+  left: 12px;
   background: {blue};
   color: #fff;
   border: none;
-  padding: 9px 18px;
-  border-radius: 7px;
-  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   z-index: 200;
-  letter-spacing: 0.3px;
 }}
-.print-btn:hover {{ opacity: 0.88; }}
+.print-btn:hover {{ opacity: 0.85; }}
 
-/* ── Tailwind 'h-full' on slide content fills exactly 720px ──────── */
-.slide > *:first-child {{ height: 100%; width: 100%; }}
-
-/* ── Print / PDF export ─────────────────────────────────────────── */
+/* ── Print / PDF export ──────────────────────────────────────── */
 @media print {{
   @page {{ size: 1280px 720px; margin: 0; }}
   html, body {{
@@ -176,31 +177,63 @@ body {{
     width:  1280px !important;
     height: 720px  !important;
     box-shadow: none !important;
+    border-radius: 0 !important;
   }}
   .slide:last-child {{ page-break-after: auto; }}
-  .nav-overlay, .print-btn {{ display: none !important; }}
+  #nav-overlay, .print-btn {{ display: none !important; }}
 }}
 """
 
 
 # ══════════════════════════════════════════════════════════════════
-#  WRAP ONE SLIDE
+#  HEAD BLOCK — fonts + Tailwind + Chart.js (no icon CDN needed)
 # ══════════════════════════════════════════════════════════════════
 
-def _wrap_slide(slot: int, html_content: str, plan_slide: dict, style: dict) -> str:
-    subtitle  = plan_slide.get('subtitle', 'Executive SRE Report')
-    sub_label = (subtitle or 'Executive SRE Report')[:45]
-    muted     = style.get('muted', '#666666')
+CDN_HEAD = """
+  <!-- Fonts: Inter (body) + Playfair Display (editorial headings) + JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,800;0,900;1,700&family=Inter:wght@300;400;500;600;700;800&family=Sora:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 
-    # Small SVG dot for brand footer (no external icons needed)
-    dot_svg = (f'<svg width="8" height="8" viewBox="0 0 8 8">'
-               f'<circle cx="4" cy="4" r="3" fill="{muted}" opacity="0.5"/></svg>')
+  <!-- Tailwind CSS CDN runtime (all classes including arbitrary values) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js (stable CDN) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+  <script>
+    /* ── Globally disable Chart.js animations — required for PDF ── */
+    document.addEventListener('DOMContentLoaded', function() {
+      if (window.Chart) {
+        Chart.defaults.animation = false;
+        Chart.defaults.animations = { numbers: false };
+        Chart.defaults.transitions = {};
+      }
+    });
+
+    /* ── Chart ready sentinel — Playwright awaits this ── */
+    window.__chartsReady = 0;
+  </script>
+"""
+
+# ══════════════════════════════════════════════════════════════════
+#  SLIDE WRAPPER
+# ══════════════════════════════════════════════════════════════════
+
+def _wrap_slide(slot: int, html_content: str,
+                plan_slide: dict, style: dict) -> str:
+    subtitle = (plan_slide.get('subtitle') or plan_slide.get('title') or 'Report')[:48]
+    muted    = style.get('muted', '#666666')
+
+    # Tiny dot SVG for brand footer
+    dot = (f'<svg width="6" height="6" viewBox="0 0 6 6" '
+           f'fill="{muted}" opacity="0.5"><circle cx="3" cy="3" r="2.5"/></svg>')
 
     return (
         f'<section class="slide" data-slot="{slot}">'
         f'<span class="slide-num">{slot:02d}</span>'
-        + html_content
-        + f'<div class="slide-brand">{dot_svg}{sub_label}</div>'
+        + html_content +
+        f'<div class="slide-brand">{dot}{subtitle}</div>'
         f'</section>'
     )
 
@@ -212,11 +245,11 @@ def _wrap_slide(slot: int, html_content: str, plan_slide: dict, style: dict) -> 
 NAV_JS = """
 <script>
 (function() {
-  /* Slide counter nav overlay */
   var slides = document.querySelectorAll('.slide');
   var nav    = document.getElementById('nav-overlay');
-  var total  = slides.length;
-  if (!nav) return;
+  if (!nav || !slides.length) return;
+  var total = slides.length;
+  nav.textContent = 'Slide 1 / ' + total;
   var obs = new IntersectionObserver(function(entries) {
     entries.forEach(function(e) {
       if (e.isIntersecting)
@@ -230,76 +263,30 @@ NAV_JS = """
 
 
 # ══════════════════════════════════════════════════════════════════
-#  CDN SCRIPT / LINK BLOCK
-#  Loaded ONCE in <head>. Order matters:
-#    1. Google Fonts
-#    2. Tailwind CDN (play.tailwindcss.com — full runtime JIT)
-#    3. Chart.js (stable CDN)
-#    4. Lucide icons
-#    5. Global Chart.js defaults (animation off)
-#    6. Lucide init deferred to DOMContentLoaded
-# ══════════════════════════════════════════════════════════════════
-
-CDN_HEAD = """
-  <!-- Google Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;800&family=Inter:wght@300;400;500;600;700&family=Sora:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-
-  <!-- Tailwind CSS CDN (runtime JIT — all arbitrary values work) -->
-  <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- Chart.js -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-
-  <!-- Lucide icons (renders <i data-lucide="name"> → inline SVG) -->
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-
-  <script>
-    /* ── Global Chart.js defaults: disable ALL animation ── */
-    document.addEventListener('DOMContentLoaded', function() {
-      if (window.Chart) {
-        Chart.defaults.animation = false;
-        Chart.defaults.animations = { numbers: false };
-        Chart.defaults.transitions = {};
-      }
-
-      /* ── Render all Lucide icons ── */
-      if (window.lucide) {
-        lucide.createIcons();
-      }
-    });
-
-    /* ── Chart ready sentinel counter (Playwright awaits this) ── */
-    window.__chartsReady = 0;
-    window.__chartsTotal = 0; /* set by assembler in a data attribute */
-  </script>
-"""
-
-
-# ══════════════════════════════════════════════════════════════════
 #  PUBLIC API
 # ══════════════════════════════════════════════════════════════════
 
-def run(plan: dict, slides_html: list, prev_sections: Optional[list] = None) -> tuple:
+def run(plan: dict,
+        slides_html: list,
+        prev_sections: Optional[list] = None) -> tuple[str, list]:
     """
-    Assemble all slides into one complete HTML document.
+    Assemble all slides into a complete HTML document.
 
     Args:
-        plan:          Full plan from Agent 1
-        slides_html:   List of (slot, html_content|None) from Agent 2
-        prev_sections: Previous iteration section strings (for patch mode)
+        plan:          Full plan dict from Agent 1.
+        slides_html:   List of (slot, html_content | None) from Agent 2.
+        prev_sections: Previous iteration's section HTML strings (patch mode).
 
     Returns:
         (html_string, sections_list)
     """
     style = _get_style(plan)
 
-    # Build lookups
+    # Build lookup maps
     plan_slides  = {s['slot']: s for s in plan.get('slides', [])}
     html_by_slot = {slot: html for slot, html in slides_html if html is not None}
 
-    prev_by_slot: dict = {}
+    prev_by_slot: dict[int, str] = {}
     if prev_sections:
         for sec in prev_sections:
             m = re.search(r'data-slot="(\d+)"', sec)
@@ -308,33 +295,32 @@ def run(plan: dict, slides_html: list, prev_sections: Optional[list] = None) -> 
 
     # Assemble sections in slot order
     slots_ordered = sorted(plan_slides.keys())
-    sections      = []
+    sections: list[str] = []
+    bg    = style.get('bg',    '#F5F0E8')
+    muted = style.get('muted', '#666666')
 
     for slot in slots_ordered:
         plan_slide = plan_slides[slot]
+
         if slot in html_by_slot:
             section = _wrap_slide(slot, html_by_slot[slot], plan_slide, style)
         elif slot in prev_by_slot:
             section = prev_by_slot[slot]
         else:
-            # Empty placeholder
-            bg   = style.get('bg', '#F5F0E8')
-            text = style.get('text', '#1A1A1A')
-            muted = style.get('muted', '#666666')
+            # Empty placeholder — marks it for critic to flag
             section = (
                 f'<section class="slide" data-slot="{slot}">'
                 f'<span class="slide-num">{slot:02d}</span>'
                 f'<div class="h-full w-full flex items-center justify-center" style="background:{bg}">'
-                f'<p style="color:{muted};font-size:18px">Slide {slot} — {plan_slide.get("title","")}</p>'
-                f'</div></section>'
+                f'<p style="color:{muted};font-size:18px;font-family:monospace">'
+                f'Slide {slot} — {plan_slide.get("title", "")}'
+                f'</p></div></section>'
             )
         sections.append(section)
 
-    # Count charts in all slides so Playwright knows how long to wait
-    chart_count = _count_charts(slides_html)
-
+    chart_count  = _count_charts(slides_html)
+    report_title = plan.get('report_title', 'Report')
     css          = _build_global_css(style)
-    report_title = plan.get('report_title', 'Infrastructure Alert Report')
 
     html = (
         "<!DOCTYPE html>\n"
@@ -343,19 +329,17 @@ def run(plan: dict, slides_html: list, prev_sections: Optional[list] = None) -> 
         "  <meta charset='UTF-8'>\n"
         "  <meta name='viewport' content='width=1280'>\n"
         f"  <title>{report_title}</title>\n"
-        + CDN_HEAD
-        + f"  <style>{css}</style>\n"
-        # Embed chart total count so Playwright script can read it
+        + CDN_HEAD +
+        f"  <style>{css}</style>\n"
         f"  <meta name='chart-total' content='{chart_count}'>\n"
         "</head>\n"
         "<body>\n"
         "<button class='print-btn' onclick='window.print()'>🖨 Print / Save PDF</button>\n"
-        f"<div class='nav-overlay' id='nav-overlay'>Slide 1 / {len(sections)}</div>\n"
-        + "\n".join(sections)
-        + "\n"
-        + NAV_JS
-        + "\n</body>\n</html>"
+        f"<div id='nav-overlay'>Slide 1 / {len(sections)}</div>\n"
+        + "\n".join(sections) + "\n"
+        + NAV_JS +
+        "\n</body>\n</html>"
     )
 
-    print(f"  [Assembler] Done — {len(sections)} slides, {chart_count} charts ({len(html):,} chars)")
+    print(f"  [Assembler] {len(sections)} slides | {chart_count} charts | {len(html):,} chars")
     return html, sections

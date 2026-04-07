@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
-# orchestrator.py  —  Universal PDF Pipeline (NotebookLM-style)
+# orchestrator.py — NotebookLM-style PDF Pipeline
 #
 # Flow:
-#   Any input (.txt/.csv/.pdf)
-#     → [Agent 0: Analyzer]  LLM understands content (any format)            → analysis
-#     → [Agent 1: Planner]   LLM designs N slide stories from analysis       → plan.json
-#     → [Agent 2: Designer]  LLM generates full HTML+SVG per slide           → slides list
-#     → [Agent 3: Assembler] Merges slides into one print-ready HTML         → report.html
-#     → [Agent 4: Critic]    Scores HTML → feedback                          → critic.json
+#   Any input (.txt / .csv / .pdf)
+#     → [Agent 0+1: Analyzer + Planner]  Understand content, plan N slides
+#     → [Agent 2:   Designer]            Generate HTML per slide (with inline SVG icons)
+#     → [Agent 3:   Assembler]           Merge into one print-ready HTML
+#     → [Agent 4:   Critic]              Score → feedback
 #     → if score ≥ threshold → export PDF
-#     → if score <  threshold → Designer re-renders only broken slides → loop
-#
-# Works with: alerts, logs, topics, questions, CSV data, documents, etc.
+#     → if score <  threshold → patch broken slides → loop
 #
 # Usage:
 #   python orchestrator.py --input alerts.txt
 #   python orchestrator.py --input topic.txt --output output/report.pdf
-#   python orchestrator.py --input data.csv --html-only --iterations 5
+#   python orchestrator.py --input data.csv --style dark --html-only
+#   python orchestrator.py --input logs.txt --iterations 5 --threshold 8.0
 
-import argparse, asyncio, json, os, sys
+import argparse, json, os, sys
 from datetime import datetime
 from pathlib import Path
 
 try:
     from rich.console import Console
-    from rich.rule import Rule
-    from rich.table import Table
-    from rich import box
+    from rich.rule    import Rule
+    from rich.table   import Table
+    from rich         import box
     C = Console()
     def log(msg, style=""): C.print(msg, style=style)
     def rule(t=""): C.print(Rule(t))
@@ -47,51 +45,53 @@ sys.path.insert(0, str(Path(__file__).parent))
 def load(path: str) -> str:
     p = Path(path)
     if not p.exists():
-        log(f"[red]File not found: {path}[/red]"); sys.exit(1)
+        log(f"[red]File not found: {path}[/red]")
+        sys.exit(1)
 
     ext = p.suffix.lower()
     log(f"📂 Loading [cyan]{ext}[/cyan] — {p.name}")
 
-    # PDF input
+    # PDF
     if ext == '.pdf':
         try:
             import pdfplumber
             with pdfplumber.open(path) as pdf:
                 text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-            log(f"   {len(text):,} chars extracted from PDF")
+            log(f"   {len(text):,} chars from PDF ({len(pdf.pages)} pages)")
             return text[:config.MAX_DATA_CHARS]
         except ImportError:
-            log("   [yellow]pdfplumber not installed — trying PyPDF2[/yellow]")
+            pass
         try:
             import PyPDF2
             with open(path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
-                text   = "\n".join(
+                text = "\n".join(
                     reader.pages[i].extract_text() or ""
                     for i in range(len(reader.pages))
                 )
             return text[:config.MAX_DATA_CHARS]
         except ImportError:
-            log("   [red]No PDF library found. Install: pip install pdfplumber[/red]")
+            log("   [red]No PDF library. Install: pip install pdfplumber[/red]")
             sys.exit(1)
 
-    # CSV input — pass as text, LLM analyzer will understand it
+    # CSV
     if ext == '.csv':
         try:
             import pandas as pd
-            df = pd.read_csv(path)
-            log(f"   {len(df)} rows × {len(df.columns)} columns")
-            raw = f"CSV data with {len(df)} rows and columns: {list(df.columns)}\n\n"
+            df  = pd.read_csv(path)
+            raw = f"CSV data — {len(df)} rows × {len(df.columns)} columns\nColumns: {list(df.columns)}\n\n"
             raw += df.to_string(index=False)
+            log(f"   {len(df)} rows × {len(df.columns)} cols")
             return raw[:config.MAX_DATA_CHARS]
         except ImportError:
-            pass
+            pass  # Fall through to text reader
 
-    # Default: read as text
+    # Default: plain text
     with open(path, encoding='utf-8', errors='replace') as f:
         raw = f.read()
-    log(f"   {len(raw):,} chars")
-    return raw[:config.MAX_DATA_CHARS] + ("\n...[truncated]" if len(raw) > config.MAX_DATA_CHARS else "")
+    truncated = len(raw) > config.MAX_DATA_CHARS
+    log(f"   {len(raw):,} chars{' (truncating)' if truncated else ''}")
+    return raw[:config.MAX_DATA_CHARS] + ("\n...[truncated]" if truncated else "")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -101,35 +101,31 @@ def load(path: str) -> str:
 def export_pdf(html_path: str, pdf_path: str) -> bool:
     abs_html = str(Path(html_path).resolve())
 
-    # 1. Playwright (best quality — waits for all Chart.js renders)
+    # 1. Playwright (best — waits for Chart.js renders)
     try:
         from playwright.sync_api import sync_playwright
-        log("   Converting via [cyan]Playwright[/cyan] (awaiting Chart.js renders)...")
+        log("   Converting via [cyan]Playwright[/cyan]...")
         with sync_playwright() as pw:
             br = pw.chromium.launch()
             pg = br.new_page(viewport={"width": 1280, "height": 720})
             pg.goto(f"file:///{abs_html}", wait_until="networkidle")
 
-            # Read how many charts to expect from the meta tag
             chart_total = pg.evaluate(
                 "parseInt(document.querySelector('meta[name=chart-total]')?.content || '0')"
             )
             if chart_total > 0:
-                log(f"   Waiting for {chart_total} Chart.js chart(s) to render...")
+                log(f"   Waiting for {chart_total} Chart.js charts...")
                 try:
-                    # Wait up to 8s for all charts to call window.__chartsReady++
                     pg.wait_for_function(
-                        f"window.__chartsReady >= {chart_total}",
-                        timeout=8000
+                        f"window.__chartsReady >= {chart_total}", timeout=10000
                     )
                 except Exception:
                     log("   [yellow]Chart wait timed out — capturing anyway[/yellow]")
             else:
-                # No charts — just wait for fonts/layout
                 pg.wait_for_timeout(1500)
 
-            # Extra 300ms for Lucide icon renders and layout paint
-            pg.wait_for_timeout(300)
+            # Extra settle time for layout/font paint
+            pg.wait_for_timeout(500)
 
             pg.pdf(
                 path=pdf_path,
@@ -152,7 +148,7 @@ def export_pdf(html_path: str, pdf_path: str) -> bool:
         opts = {
             "page-width": "1280px", "page-height": "720px",
             "enable-local-file-access": "",
-            "javascript-delay": "3000",   # longer delay to let charts render
+            "javascript-delay": "4000",
             "quiet": "",
         }
         log("   Converting via [cyan]pdfkit[/cyan]...")
@@ -166,9 +162,9 @@ def export_pdf(html_path: str, pdf_path: str) -> bool:
 
     log(f"""
   [yellow]⚠ No PDF converter available.[/yellow]
-  Install:  pip install playwright && playwright install chromium
+  Install Playwright:   pip install playwright && playwright install chromium
 
-  Or open in Chrome and use File → Print → Save as PDF:
+  Or open in Chrome → File → Print → Save as PDF:
     [cyan]{abs_html}[/cyan]
 """)
     return False
@@ -184,24 +180,24 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     stem = Path(output_path).stem
     ts   = datetime.now().strftime("%H:%M:%S")
 
-    rule(f"🚀  Universal PDF Pipeline  [{ts}]")
+    rule(f"🚀  NotebookLM PDF Pipeline  [{ts}]")
     log(f"  Input:      [cyan]{input_path}[/cyan]")
     log(f"  Output:     [cyan]{output_path}[/cyan]")
     log(f"  Style:      [cyan]{config.VISUAL_STYLE}[/cyan]")
+    log(f"  Seed:       [cyan]{config.DESIGN_SEED}[/cyan]  (changes every run)")
     log(f"  Max loops:  [cyan]{config.MAX_ITERATIONS}[/cyan]")
     log(f"  Threshold:  [cyan]{config.PASS_THRESHOLD}/10[/cyan]")
     rule()
 
-    # ── Import agents ─────────────────────────────────────────────
     from agents.planner   import run as plan_slides
     from agents.designer  import run as design_slides
     from agents.assembler import run as assemble_html
     from agents.critic    import run as critique
 
     # ── AGENTS 0+1: Analyzer + Planner ────────────────────────────
-    rule("Agent 0+1 — Content Analyzer + Narrative Planner")
+    rule("Agent 0+1 — Analyzer + Planner")
     raw_data = load(input_path)
-    plan = plan_slides(raw_data)
+    plan     = plan_slides(raw_data)
 
     if not plan.get('slides'):
         log("[red]Planner returned no slides — aborting[/red]")
@@ -209,12 +205,12 @@ def run(input_path: str, output_path: str, html_only: bool = False):
 
     # Save plan
     plan_path = str(out_dir / f"{stem}_plan.json")
-    plan_no_parsed = {k: v for k, v in plan.items() if not k.startswith('_')}
+    plan_save = {k: v for k, v in plan.items() if not k.startswith('_')}
     with open(plan_path, 'w') as f:
-        json.dump(plan_no_parsed, f, indent=2, default=str)
-    log(f"  💾 Plan saved: [dim]{plan_path}[/dim]")
+        json.dump(plan_save, f, indent=2, default=str)
+    log(f"  💾 Plan: [dim]{plan_path}[/dim]")
 
-    # ── AGENTS 2+3+4: Design → Assemble → Critique loop ──────────
+    # ── AGENTS 2+3+4: Design → Assemble → Critic loop ─────────────
     rule("Agent 2 — Designer  →  Agent 3 — Assembler  →  Agent 4 — Critic")
 
     best_html     = None
@@ -227,27 +223,28 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     for iteration in range(1, config.MAX_ITERATIONS + 1):
         log(f"\n  [bold]── Iteration {iteration}/{config.MAX_ITERATIONS} ──[/bold]")
 
-        # ── Agent 2: Designer ────────────────────────────────────
+        # Determine which slides to redo
         if iteration == 1:
             log("  [Agent 2] Designing all slides...")
-            slides_to_redo = None   # All slides
+            slides_to_redo = None
         else:
-            slides_to_fix  = feedback.get('slides_to_fix', []) if feedback else []
-            slots_to_fix   = [int(s.get('slot', 0)) for s in slides_to_fix if s.get('slot')]
-            if slots_to_fix:
-                log(f"  [Agent 2] Redesigning slides: {slots_to_fix} ({len(slots_to_fix)} of {len(plan['slides'])} — saving {len(plan['slides'])-len(slots_to_fix)} calls)")
-                slides_to_redo = slots_to_fix
+            fixes      = feedback.get('slides_to_fix', []) if feedback else []
+            fix_slots  = [int(s.get('slot', 0)) for s in fixes if s.get('slot')]
+            if fix_slots:
+                log(f"  [Agent 2] Patching slots: {fix_slots} ({len(fix_slots)} of {len(plan['slides'])})")
+                slides_to_redo = fix_slots
             else:
-                log("  [Agent 2] No specific slides flagged — redesigning all...")
+                log("  [Agent 2] No specific slots flagged — redesigning all")
                 slides_to_redo = None
 
+        # ── Agent 2: Designer ──────────────────────────────────────
         slides_html = design_slides(
-            plan          = plan,
-            feedback      = feedback,
-            slides_to_redo= slides_to_redo,
+            plan           = plan,
+            feedback       = feedback,
+            slides_to_redo = slides_to_redo,
         )
 
-        # ── Agent 3: Assembler ───────────────────────────────────
+        # ── Agent 3: Assembler ─────────────────────────────────────
         log("  [Agent 3] Assembling HTML...")
         html, sections = assemble_html(
             plan          = plan,
@@ -262,7 +259,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
             f.write(html)
         log(f"  💾 [dim]{iter_html}[/dim]")
 
-        # ── Agent 4: Critic ──────────────────────────────────────
+        # ── Agent 4: Critic ────────────────────────────────────────
         result = critique(html, plan)
         history.append(result.to_dict())
 
@@ -271,25 +268,26 @@ def run(input_path: str, output_path: str, html_only: bool = False):
             best_html     = html
             best_sections = sections
 
-        # Save critic JSON
         crit_path = str(out_dir / f"{stem}_iter{iteration}_critic.json")
         with open(crit_path, 'w') as f:
             json.dump(result.to_dict(), f, indent=2)
 
         if result.passed:
-            log(f"  [green]✅ Quality gate passed! Score: {result.weighted_score:.2f} ≥ {config.PASS_THRESHOLD}[/green]")
+            log(f"  [green]✅ Quality gate passed! {result.weighted_score:.2f} ≥ {config.PASS_THRESHOLD}[/green]")
             best_html = html
             break
 
         if iteration < config.MAX_ITERATIONS:
             n = len(result.slides_to_fix)
-            log(f"  [yellow]Score {result.weighted_score:.2f} < {config.PASS_THRESHOLD} — "
-                f"{'patching ' + str(n) + ' slide(s)' if n else 'full redesign'} next...[/yellow]")
+            log(
+                f"  [yellow]Score {result.weighted_score:.2f} < {config.PASS_THRESHOLD} — "
+                f"{'patching ' + str(n) + ' slide(s)' if n else 'full redesign'} next[/yellow]"
+            )
             feedback = result.to_dict()
         else:
             log(f"  [yellow]Max iterations reached. Best score: {best_score:.2f}[/yellow]")
 
-    # ── Export ────────────────────────────────────────────────────
+    # ── Export ─────────────────────────────────────────────────────
     rule("📄  Exporting")
     final_html = str(out_dir / f"{stem}.html")
     with open(final_html, 'w', encoding='utf-8') as f:
@@ -299,7 +297,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     if not html_only and output_path.endswith('.pdf'):
         export_pdf(final_html, output_path)
 
-    # ── Summary ───────────────────────────────────────────────────
+    # ── Summary ────────────────────────────────────────────────────
     rule("📊  Summary")
     if HAS_RICH and history:
         t = Table(box=box.SIMPLE, show_header=True)
@@ -317,8 +315,10 @@ def run(input_path: str, output_path: str, html_only: bool = False):
                 h["verdict"][:60],
             )
         C.print(t)
+
     log(f"  Final score: [bold]{best_score:.2f}/10[/bold]")
-    log(f"  Report:      [green]{final_html}[/green]")
+    log(f"  HTML:        [green]{final_html}[/green]")
+    log(f"  Design seed: [dim]{config.DESIGN_SEED}[/dim] (run again for different layout)")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -326,20 +326,25 @@ def run(input_path: str, output_path: str, html_only: bool = False):
 # ══════════════════════════════════════════════════════════════════
 
 def main():
-    p = argparse.ArgumentParser(description="Universal PDF Pipeline (NotebookLM-style)")
-    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf) — any content")
+    p = argparse.ArgumentParser(description="NotebookLM-style PDF Generator")
+    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf)")
     p.add_argument("--output",     default="output/report.pdf")
     p.add_argument("--iterations", type=int,   default=config.MAX_ITERATIONS)
     p.add_argument("--threshold",  type=float, default=config.PASS_THRESHOLD)
     p.add_argument("--html-only",  action="store_true")
-    p.add_argument("--style",      default=config.VISUAL_STYLE,
-                   choices=["notebooklm", "modern", "auto"],
-                   help="Visual style (auto = LLM chooses based on content tone)")
+    p.add_argument("--style",
+                   default=config.VISUAL_STYLE,
+                   choices=["notebooklm", "modern", "dark", "auto"],
+                   help="Visual style preset (auto = tone-adaptive)")
+    p.add_argument("--seed",       type=int, default=None,
+                   help="Design seed (omit for random — same seed = same layout)")
     args = p.parse_args()
 
     config.MAX_ITERATIONS = args.iterations
     config.PASS_THRESHOLD = args.threshold
     config.VISUAL_STYLE   = args.style
+    if args.seed is not None:
+        config.DESIGN_SEED = args.seed
 
     run(args.input, args.output, html_only=args.html_only)
 

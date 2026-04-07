@@ -1,35 +1,1000 @@
+# # agents/planner.py
+# #
+# # AGENT 0+1 — CONTENT ANALYZER + NARRATIVE PLANNER
+# # ══════════════════════════════════════════════════
+# # NotebookLM-style: two-pass for large inputs.
+# #
+# # Pass 1 (Analyzer): LLM reads chunks and extracts structured facts.
+# #                    For large files: summarize each chunk, then synthesize.
+# #                    For topic/question inputs: LLM enriches from own knowledge.
+# #
+# # Pass 2 (Planner):  LLM designs N slide narratives from the analysis.
+# #                    Uses DESIGN_SEED to vary layouts every run.
+# #                    Each run with same data produces a different visual narrative.
+
+# import json, re, sys
+# from pathlib import Path
+# sys.path.insert(0, str(Path(__file__).parent.parent))
+# from utils.llm import call_json
+# import config
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  CHUNKER — format-agnostic, no regex assumptions
+# # ══════════════════════════════════════════════════════════════════
+
+# def _chunk_text(raw: str, max_chunk_chars: int = 4000) -> list[str]:
+#     raw = raw.strip()
+#     if not raw:
+#         return []
+#     if len(raw) <= max_chunk_chars:
+#         return [raw]
+
+#     blocks   = re.split(r'\n\s*\n', raw)
+#     chunks, current = [], ""
+#     for block in blocks:
+#         if len(current) + len(block) > max_chunk_chars and current:
+#             chunks.append(current.strip())
+#             current = block
+#         else:
+#             current += "\n\n" + block
+#     if current.strip():
+#         chunks.append(current.strip())
+#     return chunks or [raw[:max_chunk_chars]]
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  CHUNK SUMMARIZER — condenses large inputs before analysis
+# #  FIX: The original only sent 4 chunks to the analyzer.
+# #       Now we summarize every chunk and synthesize them all.
+# # ══════════════════════════════════════════════════════════════════
+
+# CHUNK_SUMMARY_PROMPT = """You are summarizing a section of a larger document for a presentation designer.
+# Extract and list ONLY concrete facts, numbers, names, events, and patterns from this section.
+# No prose. No headers. Just a bullet list of facts.
+
+# SECTION:
+# {chunk}
+
+# Return JSON:
+# {{
+#   "facts": ["fact 1", "fact 2", "..."],
+#   "entities": ["entity1", "entity2"],
+#   "anomalies": ["unusual thing 1"]
+# }}"""
+
+
+# def _summarize_chunks(chunks: list[str]) -> list[dict]:
+#     """Summarize each chunk into structured facts. Used for large inputs."""
+#     summaries = []
+#     for i, chunk in enumerate(chunks):
+#         print(f"    Summarizing chunk {i+1}/{len(chunks)}...")
+#         try:
+#             s = call_json(
+#                 CHUNK_SUMMARY_PROMPT.format(chunk=chunk[:3500]),
+#                 key="analyzer",
+#                 max_tokens=1500,
+#             )
+#             summaries.append(s)
+#         except Exception as e:
+#             print(f"    Chunk {i+1} summary failed: {e} — using raw text")
+#             summaries.append({
+#                 "facts": [chunk[:300]],
+#                 "entities": [],
+#                 "anomalies": [],
+#             })
+#     return summaries
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  ANALYZER PROMPT
+# # ══════════════════════════════════════════════════════════════════
+
+# ANALYZER_PROMPT = """You are a world-class content analyst preparing source material for a NotebookLM-quality PDF report.
+# Deeply understand the input and extract everything a presentation designer needs.
+
+# INPUT TEXT:
+# {text_sample}
+
+# {chunk_summaries_section}
+
+# TOTAL INPUT: {total_chars} characters across {chunk_count} sections.
+
+# Determine ALL of the following with maximum specificity:
+
+# 1. content_type — What kind of content is this?
+#    E.g.: "infrastructure_alerts", "application_logs", "kubernetes_tutorial",
+#    "aws_architecture", "incident_report", "performance_metrics",
+#    "research_paper", "business_report", "how_to_guide", "general_topic"
+
+# 2. subject — 2-3 sentence summary of exactly what this content is about.
+
+# 3. report_title — A compelling, specific, journalistic title (NOT generic).
+#    BAD: "Kubernetes Overview"
+#    GOOD: "Kubernetes at Scale: Architecture, Failures & Recovery Patterns"
+
+# 4. report_subtitle — A professional subtitle with context (audience, date range, etc.)
+
+# 5. audience — Who reads this? Be specific.
+#    E.g.: "Senior SRE Team", "Platform Engineering Leads", "Kubernetes Beginners",
+#    "Cloud Architecture Decision Makers", "DevOps Engineers"
+
+# 6. key_entities — Named items found: hosts, services, tools, concepts, companies (up to 20).
+
+# 7. key_facts — The most important facts. MUST include exact numbers when available.
+#    For data-rich input (logs/alerts/metrics): extract REAL values, timestamps, counts.
+#    For topic/educational input: generate REAL authoritative facts from your knowledge.
+#    BAD: "Many errors occurred"
+#    GOOD: "1,847 critical alerts fired between 03:00-07:00 UTC, 73% from storage cluster"
+#    BAD: "Kubernetes manages containers"
+#    GOOD: "Kubernetes orchestrates containers via 3 control plane components: API server, etcd, scheduler. etcd stores all cluster state as key-value pairs."
+
+# 8. themes — 5-8 distinct angles/chapters for the presentation. Each should be a specific
+#    story arc, not a generic category.
+#    BAD: ["Overview", "Details", "Conclusion"]
+#    GOOD: ["The 3AM Cascading Failure Chain", "etcd Saturation as Root Cause",
+#           "Cross-Zone Dependency Mapping", "Recovery Playbook"]
+
+# 9. tone — "urgent" | "analytical" | "educational" | "executive_summary" | "informational"
+
+# 10. data_richness — "high" | "medium" | "low"
+#     high = real numbers, real timestamps, real names throughout
+#     low  = topic/question input — YOU must fill key_facts with real authoritative knowledge
+
+# 11. narrative_arc — One sentence describing the story this report tells.
+#     E.g.: "A cascading storage failure that started as a misconfiguration and escalated into a 4-hour outage affecting 3 services."
+
+# CRITICAL for data_richness="low":
+# If the input is a question or topic (e.g. "explain AWS", "make a PDF on ML"),
+# you MUST populate key_facts with 15-20 REAL, ACCURATE, SPECIFIC facts from your knowledge.
+# Include real numbers, real names, real architecture details. Be an expert, not a generalist.
+
+# Return ONLY valid JSON:
+# {{
+#   "content_type": "...",
+#   "subject": "...",
+#   "report_title": "...",
+#   "report_subtitle": "...",
+#   "audience": "...",
+#   "key_entities": ["entity1", ...],
+#   "key_facts": [
+#     {{"fact": "Specific fact with real data", "category": "theme it belongs to", "importance": "high"}},
+#     ...
+#   ],
+#   "themes": ["Theme 1", "Theme 2", ...],
+#   "tone": "analytical",
+#   "data_richness": "high",
+#   "narrative_arc": "..."
+# }}"""
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  PLANNER PROMPT — uses DESIGN_SEED for visual variety
+# # ══════════════════════════════════════════════════════════════════
+
+# PLANNER_PROMPT = """You are an expert presentation architect creating a NotebookLM-quality PDF.
+# Design {n_slides} slides that tell a SPECIFIC, VISUAL, COMPELLING story.
+
+# DESIGN SEED: {design_seed}
+# Use this seed to make creative layout and color choices. Different seeds = different aesthetics.
+# High seed (>5000): bold, asymmetric, dramatic. Low seed (<3000): refined, structured, minimal.
+# Mid seed: balanced editorial. Vary your visual type choices based on this seed.
+
+# CONTENT ANALYSIS:
+# {analysis}
+
+# RAW SOURCE EXCERPT (for additional context):
+# {raw_excerpt}
+
+# AVAILABLE ICON NAMES (use ONLY these exact names in the "icon" fields):
+# {icon_list}
+
+# VISUAL TYPES — choose the best fit, vary them across slides:
+#   cover_hero           → Full-bleed cover: giant title + 3 preview insight cards
+#   big_number_hero      → One massive stat fills the slide (text-9xl, context below)
+#   stat_cards_row       → 4 equal metric/concept cards in a grid
+#   bar_chart_annotated  → Chart.js bar chart with callout annotations
+#   area_chart_gradient  → Chart.js area/line chart showing trend over time
+#   timeline_events      → Horizontal timeline of key events with milestones
+#   topology_map         → CSS node/card diagram — system architecture or concept map
+#   matrix_table         → HTML comparison table (teams × dimensions, options × criteria)
+#   domino_chain         → Horizontal cause-effect cards with arrows between them
+#   comparison_panel     → Two equal panels, each with chart or stats inside
+#   priority_table       → Styled action table: Item | Priority | Action columns
+#   scatter_quadrant     → 2×2 grid (Impact vs Effort, Risk vs Value, etc.)
+#   funnel_diagram       → Funnel/pipeline showing stages with counts
+#   info_cards_grid      → 2×2 or 3×2 grid of rich content cards with icons
+#   concept_diagram      → 3-6 step workflow with connectors (architecture, process)
+#   two_column_bullets   → Left: key insight panel; Right: bullet list with icons
+#   callout_hero         → Large pull-quote or key finding with supporting stats below
+
+# COLOR MOODS:
+#   critical_red    → #C0392B accent (urgent, broken, failure)
+#   warning_amber   → #D4880E accent (degraded, at-risk)
+#   info_blue       → #2471A3 accent (informational, educational)
+#   success_green   → #1E8449 accent (achievements, solutions, health)
+#   neutral_slate   → #4A5568 accent (summary, conclusion, overview)
+#   deep_purple     → #6B46C1 accent (innovation, AI, future)
+#   teal_focus      → #0D9488 accent (process, flow, systems)
+
+# RULES — read carefully:
+# 1. Slide 1 MUST be cover_hero. Final slide MUST be a conclusion/takeaways slide.
+# 2. Use at LEAST 6 different visual_types across all slides.
+# 3. Titles must be JOURNALISTIC and SPECIFIC — not generic labels.
+#    BAD: "System Overview" | GOOD: "Why Three Services Went Dark at 3AM"
+# 4. The "data" field must contain ALL values the designer needs to render the slide.
+#    Include real numbers, real names, real labels — never say "see analysis".
+# 5. story_angle must explain WHY this slide matters to the audience.
+# 6. For "icon" fields in data: use ONLY names from the AVAILABLE ICON NAMES list above.
+# 7. Each slide needs a unique visual_type — minimize repeats.
+# 8. "visual_description" must be detailed enough for a designer to render from scratch.
+# 9. If data_richness is "low", use your knowledge to create REAL data values in the data field.
+
+# Return ONLY valid JSON:
+# {{
+#   "report_title": "...",
+#   "report_subtitle": "...",
+#   "audience": "...",
+#   "slides": [
+#     {{
+#       "slot": 1,
+#       "title": "Compelling specific title",
+#       "subtitle": "Contextual subtitle",
+#       "story_angle": "Why this slide matters",
+#       "key_insight": "The one thing the reader takes away",
+#       "visual_type": "cover_hero",
+#       "visual_description": "Detailed visual description",
+#       "layout_hint": "centered | left_text_right_visual | full_visual | header_plus_grid",
+#       "color_mood": "neutral_slate",
+#       "data": {{
+#         "key": "value — real data, real numbers"
+#       }}
+#     }}
+#   ]
+# }}"""
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  FALLBACK PLAN
+# # ══════════════════════════════════════════════════════════════════
+
+# def _fallback_plan(analysis: dict) -> dict:
+#     themes = analysis.get('themes', ['Overview', 'Details', 'Analysis', 'Summary'])
+#     facts  = analysis.get('key_facts', [])
+#     title  = analysis.get('report_title', 'Report')
+#     subtitle = analysis.get('report_subtitle', 'Generated Report')
+
+#     vt_cycle = [
+#         'stat_cards_row', 'bar_chart_annotated', 'info_cards_grid',
+#         'timeline_events', 'topology_map', 'concept_diagram', 'priority_table',
+#     ]
+#     cm_cycle = [
+#         'info_blue', 'warning_amber', 'neutral_slate',
+#         'critical_red', 'success_green', 'deep_purple', 'teal_focus',
+#     ]
+
+#     slides = [{
+#         'slot': 1,
+#         'title': title,
+#         'subtitle': subtitle,
+#         'story_angle': 'Set the stage with key highlights',
+#         'key_insight': analysis.get('subject', ''),
+#         'visual_type': 'cover_hero',
+#         'visual_description': f'Cover with title "{title}", subtitle, and 3 preview theme cards.',
+#         'layout_hint': 'centered',
+#         'color_mood': 'neutral_slate',
+#         'data': {
+#             'title': title,
+#             'subtitle': subtitle,
+#             'preview_cards': [
+#                 {'title': t, 'description': 'Key topic', 'icon': 'lightbulb'}
+#                 for t in themes[:3]
+#             ],
+#         },
+#     }]
+
+#     for i, theme in enumerate(themes[:8], 2):
+#         tf = [f for f in facts if f.get('category', '').lower() == theme.lower()]
+#         if not tf:
+#             tf = facts[max(0, i-2):min(i+1, len(facts))]
+#         slides.append({
+#             'slot': i,
+#             'title': theme,
+#             'subtitle': '',
+#             'story_angle': f'Analysis of {theme}',
+#             'key_insight': tf[0].get('fact', f'Key insights about {theme}') if tf else f'Key insights about {theme}',
+#             'visual_type': vt_cycle[(i - 2) % len(vt_cycle)],
+#             'visual_description': f'Visual showing key aspects of {theme} with real data.',
+#             'layout_hint': 'left_text_right_visual',
+#             'color_mood': cm_cycle[(i - 2) % len(cm_cycle)],
+#             'data': {'theme': theme, 'facts': [f.get('fact', '') for f in tf[:5]]},
+#         })
+
+#     slides.append({
+#         'slot': len(slides) + 1,
+#         'title': 'Key Takeaways & Next Steps',
+#         'subtitle': '',
+#         'story_angle': 'Actionable conclusions',
+#         'key_insight': 'Summary of findings and recommended actions',
+#         'visual_type': 'priority_table',
+#         'visual_description': 'Action table with key findings and next steps.',
+#         'layout_hint': 'full_visual',
+#         'color_mood': 'neutral_slate',
+#         'data': {'themes': themes[:6], 'top_facts': [f.get('fact', '') for f in facts[:5]]},
+#     })
+
+#     return {
+#         'report_title': title,
+#         'report_subtitle': subtitle,
+#         'audience': analysis.get('audience', 'General'),
+#         'slides': slides,
+#     }
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  PUBLIC API
+# # ══════════════════════════════════════════════════════════════════
+
+# def run(raw_data: str) -> dict:
+#     """
+#     Two-pass pipeline:
+#       Pass 1: Analyze content (with chunk summarization for large inputs)
+#       Pass 2: Plan slide narrative (with design seed for variety)
+#     """
+#     from utils.icons import get_all_icon_names, suggest_icons_for_topic
+
+#     chunks      = _chunk_text(raw_data)
+#     total_chars = len(raw_data)
+
+#     if not chunks:
+#         print("  [Planner] WARNING: Empty input")
+#         return {}
+
+#     # ── PASS 1A: For large inputs, pre-summarize each chunk ───────
+#     chunk_summaries_section = ""
+#     if len(chunks) > 4:
+#         print(f"  [Planner] Large input ({len(chunks)} chunks) — pre-summarizing all chunks...")
+#         summaries = _summarize_chunks(chunks)
+#         all_facts    = []
+#         all_entities = []
+#         all_anomalies = []
+#         for s in summaries:
+#             all_facts.extend(s.get('facts', []))
+#             all_entities.extend(s.get('entities', []))
+#             all_anomalies.extend(s.get('anomalies', []))
+#         # Deduplicate
+#         all_entities = list(dict.fromkeys(all_entities))[:30]
+#         chunk_summaries_section = (
+#             f"\nCHUNK SUMMARIES (from {len(chunks)} sections of the full document):\n"
+#             + json.dumps({
+#                 "total_facts_extracted": len(all_facts),
+#                 "sample_facts": all_facts[:40],
+#                 "all_entities": all_entities[:25],
+#                 "anomalies": all_anomalies[:15],
+#             }, indent=2)[:4000]
+#         )
+#         # Use first + last chunk as text sample; summaries carry the rest
+#         sample = chunks[0][:3000] + "\n\n---\n\n" + chunks[-1][:2000]
+#     else:
+#         # Small input: just send all chunks directly
+#         sample = "\n\n---\n\n".join(chunks)[:6000]
+#         chunk_summaries_section = ""
+
+#     # ── PASS 1B: LLM Analyzer ────────────────────────────────────
+#     print("  [Planner] Step 1/2: Analyzing content...")
+#     try:
+#         analysis = call_json(
+#             ANALYZER_PROMPT.format(
+#                 text_sample=sample,
+#                 chunk_summaries_section=chunk_summaries_section,
+#                 total_chars=total_chars,
+#                 chunk_count=len(chunks),
+#             ),
+#             key="analyzer",
+#             max_tokens=4000,
+#         )
+#     except Exception as e:
+#         print(f"  [Analyzer] Failed: {e} — using minimal analysis")
+#         analysis = {
+#             "content_type": "general_topic",
+#             "subject": raw_data[:200],
+#             "report_title": "Content Analysis Report",
+#             "report_subtitle": "Auto-Generated Report",
+#             "audience": "General Audience",
+#             "key_entities": [],
+#             "key_facts": [],
+#             "themes": ["Overview", "Key Points", "Analysis", "Conclusions"],
+#             "tone": "informational",
+#             "data_richness": "low",
+#             "narrative_arc": "A comprehensive analysis of the provided content.",
+#         }
+
+#     ct = analysis.get('content_type', 'unknown')
+#     dr = analysis.get('data_richness', 'unknown')
+#     print(f"    Content type: {ct} | Data richness: {dr}")
+#     print(f"    {len(analysis.get('key_facts', []))} facts | {len(analysis.get('themes', []))} themes")
+#     print(f"    Subject: {analysis.get('subject', '')[:80]}")
+
+#     # ── PASS 2: LLM Planner with design seed ─────────────────────
+#     print(f"  [Planner] Step 2/2: Designing slides (seed={config.DESIGN_SEED})...")
+
+#     # Build icon list: topic-specific icons FIRST, then generic fill
+#     subject_text = (
+#         analysis.get('subject', '') + ' ' +
+#         ' '.join(analysis.get('key_entities', [])[:10]) + ' ' +
+#         analysis.get('content_type', '')
+#     )
+#     topic_icons   = suggest_icons_for_topic(subject_text)
+#     all_icons     = get_all_icon_names()
+#     # Deduplicate: topic icons first (LLM will use them first), then rest
+#     seen = set(topic_icons)
+#     remaining = [n for n in sorted(all_icons) if n not in seen]
+#     available_icons = ", ".join(topic_icons + remaining)[:800]
+
+#     if topic_icons:
+#         print(f"    Topic icons injected: {topic_icons[:8]}")
+
+#     try:
+#         plan = call_json(
+#             PLANNER_PROMPT.format(
+#                 n_slides=config.N_SLIDES,
+#                 design_seed=config.DESIGN_SEED,
+#                 analysis=json.dumps(analysis, indent=2)[:5000],
+#                 raw_excerpt=sample[:2500],
+#                 icon_list=available_icons,
+#             ),
+#             key="planner",
+#             max_tokens=8000,
+#         )
+#     except Exception as e:
+#         print(f"  [Planner] LLM failed: {e} — using fallback plan")
+#         plan = {}
+
+#     if not plan.get('slides'):
+#         print("  [Planner] No slides returned — using fallback plan")
+#         plan = _fallback_plan(analysis)
+
+#     # Attach analysis and raw sample for downstream agents
+#     plan['_analysis']    = analysis
+#     plan['_raw_sample']  = sample[:2000]
+#     plan['_design_seed'] = config.DESIGN_SEED
+
+#     print(f"  [Planner] Done — {len(plan.get('slides', []))} slides planned")
+#     return plan
+
+
+
+# # agents/planner.py
+# #
+# # AGENT 0+1 — CONTENT ANALYZER + NARRATIVE PLANNER
+# # ══════════════════════════════════════════════════
+# # NotebookLM-style: two-pass for large inputs.
+# #
+# # Pass 1 (Analyzer): LLM reads chunks and extracts structured facts.
+# #                    For large files: summarize each chunk, then synthesize.
+# #                    For topic/question inputs: LLM enriches from own knowledge.
+# #
+# # Pass 2 (Planner):  LLM designs N slide narratives from the analysis.
+# #                    Uses DESIGN_SEED to vary layouts every run.
+# #                    Each run with same data produces a different visual narrative.
+
+# import json, re, sys
+# from pathlib import Path
+# from typing import Optional
+# sys.path.insert(0, str(Path(__file__).parent.parent))
+# from utils.llm import call_json
+# import config
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  CHUNKER — format-agnostic, no regex assumptions
+# # ══════════════════════════════════════════════════════════════════
+
+# def _chunk_text(raw: str, max_chunk_chars: Optional[int] = None) -> list[str]:
+#     if max_chunk_chars is None:
+#         max_chunk_chars = int(getattr(config, "CHUNK_MAX_CHARS", 8000))
+#     raw = raw.strip()
+#     if not raw:
+#         return []
+#     if len(raw) <= max_chunk_chars:
+#         return [raw]
+
+#     blocks   = re.split(r'\n\s*\n', raw)
+#     chunks, current = [], ""
+#     for block in blocks:
+#         if len(current) + len(block) > max_chunk_chars and current:
+#             chunks.append(current.strip())
+#             current = block
+#         else:
+#             current += "\n\n" + block
+#     if current.strip():
+#         chunks.append(current.strip())
+#     return chunks or [raw[:max_chunk_chars]]
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  CHUNK SUMMARIZER — condenses large inputs before analysis
+# #  FIX: The original only sent 4 chunks to the analyzer.
+# #       Now we summarize every chunk and synthesize them all.
+# # ══════════════════════════════════════════════════════════════════
+
+# CHUNK_SUMMARY_PROMPT = """You are summarizing a section of a larger document for a presentation designer.
+# Extract and list ONLY concrete facts, numbers, names, events, and patterns from this section.
+# No prose. No headers. Just a bullet list of facts.
+
+# SECTION:
+# {chunk}
+
+# Return JSON:
+# {{
+#   "facts": ["fact 1", "fact 2", "..."],
+#   "entities": ["entity1", "entity2"],
+#   "anomalies": ["unusual thing 1"]
+# }}"""
+
+
+# def _summarize_chunks(chunks: list[str]) -> list[dict]:
+#     """Summarize each chunk into structured facts. Used for large inputs."""
+#     cap = int(getattr(config, "CHUNK_MAX_CHARS", 8000))
+#     summary_tokens = int(getattr(config, "CHUNK_SUMMARY_MAX_TOKENS", 2500))
+#     summaries = []
+#     for i, chunk in enumerate(chunks):
+#         print(f"    Summarizing chunk {i+1}/{len(chunks)}...")
+#         section = chunk[:cap]
+#         try:
+#             s = call_json(
+#                 CHUNK_SUMMARY_PROMPT.format(chunk=section),
+#                 key="analyzer",
+#                 max_tokens=summary_tokens,
+#             )
+#             summaries.append(s)
+#         except Exception as e:
+#             print(f"    Chunk {i+1} summary failed: {e} — using raw text")
+#             summaries.append({
+#                 "facts": [section[:cap]],
+#                 "entities": [],
+#                 "anomalies": [],
+#             })
+#     return summaries
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  ANALYZER PROMPT
+# # ══════════════════════════════════════════════════════════════════
+
+# ANALYZER_PROMPT = """You are a world-class content analyst preparing source material for a NotebookLM-quality PDF report.
+# Deeply understand the input and extract everything a presentation designer needs.
+
+# INPUT TEXT:
+# {text_sample}
+
+# {chunk_summaries_section}
+
+# TOTAL INPUT: {total_chars} characters across {chunk_count} sections.
+
+# Determine ALL of the following with maximum specificity:
+
+# 1. content_type — What kind of content is this?
+#    E.g.: "infrastructure_alerts", "application_logs", "kubernetes_tutorial",
+#    "aws_architecture", "incident_report", "performance_metrics",
+#    "research_paper", "business_report", "how_to_guide", "general_topic"
+
+# 2. subject — 2-3 sentence summary of exactly what this content is about.
+
+# 3. report_title — A compelling, specific, journalistic title (NOT generic).
+#    BAD: "Kubernetes Overview"
+#    GOOD: "Kubernetes at Scale: Architecture, Failures & Recovery Patterns"
+
+# 4. report_subtitle — A professional subtitle with context (audience, date range, etc.)
+
+# 5. audience — Who reads this? Be specific.
+#    E.g.: "Senior SRE Team", "Platform Engineering Leads", "Kubernetes Beginners",
+#    "Cloud Architecture Decision Makers", "DevOps Engineers"
+
+# 6. key_entities — Named items found: hosts, services, tools, concepts, companies (up to 20).
+
+# 7. key_facts — The most important facts. MUST include exact numbers when available.
+#    For data-rich input (logs/alerts/metrics): extract REAL values, timestamps, counts.
+#    For topic/educational input: generate REAL authoritative facts from your knowledge.
+#    BAD: "Many errors occurred"
+#    GOOD: "1,847 critical alerts fired between 03:00-07:00 UTC, 73% from storage cluster"
+#    BAD: "Kubernetes manages containers"
+#    GOOD: "Kubernetes orchestrates containers via 3 control plane components: API server, etcd, scheduler. etcd stores all cluster state as key-value pairs."
+
+# 8. themes — 5-8 distinct angles/chapters for the presentation. Each should be a specific
+#    story arc, not a generic category.
+#    BAD: ["Overview", "Details", "Conclusion"]
+#    GOOD: ["The 3AM Cascading Failure Chain", "etcd Saturation as Root Cause",
+#           "Cross-Zone Dependency Mapping", "Recovery Playbook"]
+
+# 9. tone — "urgent" | "analytical" | "educational" | "executive_summary" | "informational"
+
+# 10. data_richness — "high" | "medium" | "low"
+#     high = real numbers, real timestamps, real names throughout
+#     low  = topic/question input — YOU must fill key_facts with real authoritative knowledge
+
+# 11. narrative_arc — One sentence describing the story this report tells.
+#     E.g.: "A cascading storage failure that started as a misconfiguration and escalated into a 4-hour outage affecting 3 services."
+
+# CRITICAL for data_richness="low":
+# If the input is a question or topic (e.g. "explain AWS", "make a PDF on ML"),
+# you MUST populate key_facts with 15-20 REAL, ACCURATE, SPECIFIC facts from your knowledge.
+# Include real numbers, real names, real architecture details. Be an expert, not a generalist.
+
+# Return ONLY valid JSON:
+# {{
+#   "content_type": "...",
+#   "subject": "...",
+#   "report_title": "...",
+#   "report_subtitle": "...",
+#   "audience": "...",
+#   "key_entities": ["entity1", ...],
+#   "key_facts": [
+#     {{"fact": "Specific fact with real data", "category": "theme it belongs to", "importance": "high"}},
+#     ...
+#   ],
+#   "themes": ["Theme 1", "Theme 2", ...],
+#   "tone": "analytical",
+#   "data_richness": "high",
+#   "narrative_arc": "..."
+# }}"""
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  PLANNER PROMPT — uses DESIGN_SEED for visual variety
+# # ══════════════════════════════════════════════════════════════════
+
+# PLANNER_PROMPT = """You are an expert presentation architect creating a NotebookLM-quality PDF.
+# Design {n_slides} slides that tell a SPECIFIC, VISUAL, COMPELLING story.
+
+# DESIGN SEED: {design_seed}
+# Use this seed to make creative layout and color choices. Different seeds = different aesthetics.
+# High seed (>5000): bold, asymmetric, dramatic. Low seed (<3000): refined, structured, minimal.
+# Mid seed: balanced editorial. Vary your visual type choices based on this seed.
+
+# CONTENT ANALYSIS:
+# {analysis}
+
+# RAW SOURCE EXCERPT (for additional context):
+# {raw_excerpt}
+
+# AVAILABLE ICON NAMES (use ONLY these exact names in the "icon" fields):
+# {icon_list}
+
+# VISUAL TYPES — choose the best fit, vary them across slides:
+#   cover_hero           → Full-bleed cover: giant title + 3 preview insight cards
+#   big_number_hero      → One massive stat fills the slide (text-9xl, context below)
+#   stat_cards_row       → 4 equal metric/concept cards in a grid
+#   bar_chart_annotated  → Chart.js bar chart with callout annotations
+#   area_chart_gradient  → Chart.js area/line chart showing trend over time
+#   timeline_events      → Horizontal timeline of key events with milestones
+#   topology_map         → CSS node/card diagram — system architecture or concept map
+#   matrix_table         → HTML comparison table (teams × dimensions, options × criteria)
+#   domino_chain         → Horizontal cause-effect cards with arrows between them
+#   comparison_panel     → Two equal panels, each with chart or stats inside
+#   priority_table       → Styled action table: Item | Priority | Action columns
+#   scatter_quadrant     → 2×2 grid (Impact vs Effort, Risk vs Value, etc.)
+#   funnel_diagram       → Funnel/pipeline showing stages with counts
+#   info_cards_grid      → 2×2 or 3×2 grid of rich content cards with icons
+#   concept_diagram      → 3-6 step workflow with connectors (architecture, process)
+#   two_column_bullets   → Left: key insight panel; Right: bullet list with icons
+#   callout_hero         → Large pull-quote or key finding with supporting stats below
+
+# COLOR MOODS:
+#   critical_red    → #C0392B accent (urgent, broken, failure)
+#   warning_amber   → #D4880E accent (degraded, at-risk)
+#   info_blue       → #2471A3 accent (informational, educational)
+#   success_green   → #1E8449 accent (achievements, solutions, health)
+#   neutral_slate   → #4A5568 accent (summary, conclusion, overview)
+#   deep_purple     → #6B46C1 accent (innovation, AI, future)
+#   teal_focus      → #0D9488 accent (process, flow, systems)
+
+# RULES — read carefully:
+# 1. Slide 1 MUST be cover_hero. Final slide MUST be a conclusion/takeaways slide.
+# 2. Use at LEAST 6 different visual_types across all slides.
+# 3. Titles must be JOURNALISTIC and SPECIFIC — not generic labels.
+#    BAD: "System Overview" | GOOD: "Why Three Services Went Dark at 3AM"
+# 4. The "data" field must contain ALL values the designer needs to render the slide.
+#    Include real numbers, real names, real labels — never say "see analysis".
+# 5. story_angle must explain WHY this slide matters to the audience.
+# 6. For "icon" fields in data: use ONLY names from the AVAILABLE ICON NAMES list above.
+# 7. Each slide needs a unique visual_type — minimize repeats.
+# 8. "visual_description" must be detailed enough for a designer to render from scratch.
+# 9. If data_richness is "low", use your knowledge to create REAL data values in the data field.
+
+# Return ONLY valid JSON:
+# {{
+#   "report_title": "...",
+#   "report_subtitle": "...",
+#   "audience": "...",
+#   "slides": [
+#     {{
+#       "slot": 1,
+#       "title": "Compelling specific title",
+#       "subtitle": "Contextual subtitle",
+#       "story_angle": "Why this slide matters",
+#       "key_insight": "The one thing the reader takes away",
+#       "visual_type": "cover_hero",
+#       "visual_description": "Detailed visual description",
+#       "layout_hint": "centered | left_text_right_visual | full_visual | header_plus_grid",
+#       "color_mood": "neutral_slate",
+#       "data": {{
+#         "key": "value — real data, real numbers"
+#       }}
+#     }}
+#   ]
+# }}"""
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  FALLBACK PLAN
+# # ══════════════════════════════════════════════════════════════════
+
+# def _fallback_plan(analysis: dict) -> dict:
+#     themes = analysis.get('themes', ['Overview', 'Details', 'Analysis', 'Summary'])
+#     facts  = analysis.get('key_facts', [])
+#     title  = analysis.get('report_title', 'Report')
+#     subtitle = analysis.get('report_subtitle', 'Generated Report')
+
+#     vt_cycle = [
+#         'stat_cards_row', 'bar_chart_annotated', 'info_cards_grid',
+#         'timeline_events', 'topology_map', 'concept_diagram', 'priority_table',
+#     ]
+#     cm_cycle = [
+#         'info_blue', 'warning_amber', 'neutral_slate',
+#         'critical_red', 'success_green', 'deep_purple', 'teal_focus',
+#     ]
+
+#     slides = [{
+#         'slot': 1,
+#         'title': title,
+#         'subtitle': subtitle,
+#         'story_angle': 'Set the stage with key highlights',
+#         'key_insight': analysis.get('subject', ''),
+#         'visual_type': 'cover_hero',
+#         'visual_description': f'Cover with title "{title}", subtitle, and 3 preview theme cards.',
+#         'layout_hint': 'centered',
+#         'color_mood': 'neutral_slate',
+#         'data': {
+#             'title': title,
+#             'subtitle': subtitle,
+#             'preview_cards': [
+#                 {'title': t, 'description': 'Key topic', 'icon': 'lightbulb'}
+#                 for t in themes[:3]
+#             ],
+#         },
+#     }]
+
+#     for i, theme in enumerate(themes[:8], 2):
+#         tf = [f for f in facts if f.get('category', '').lower() == theme.lower()]
+#         if not tf:
+#             tf = facts[max(0, i-2):min(i+1, len(facts))]
+#         slides.append({
+#             'slot': i,
+#             'title': theme,
+#             'subtitle': '',
+#             'story_angle': f'Analysis of {theme}',
+#             'key_insight': tf[0].get('fact', f'Key insights about {theme}') if tf else f'Key insights about {theme}',
+#             'visual_type': vt_cycle[(i - 2) % len(vt_cycle)],
+#             'visual_description': f'Visual showing key aspects of {theme} with real data.',
+#             'layout_hint': 'left_text_right_visual',
+#             'color_mood': cm_cycle[(i - 2) % len(cm_cycle)],
+#             'data': {'theme': theme, 'facts': [f.get('fact', '') for f in tf[:5]]},
+#         })
+
+#     slides.append({
+#         'slot': len(slides) + 1,
+#         'title': 'Key Takeaways & Next Steps',
+#         'subtitle': '',
+#         'story_angle': 'Actionable conclusions',
+#         'key_insight': 'Summary of findings and recommended actions',
+#         'visual_type': 'priority_table',
+#         'visual_description': 'Action table with key findings and next steps.',
+#         'layout_hint': 'full_visual',
+#         'color_mood': 'neutral_slate',
+#         'data': {'themes': themes[:6], 'top_facts': [f.get('fact', '') for f in facts[:5]]},
+#     })
+
+#     return {
+#         'report_title': title,
+#         'report_subtitle': subtitle,
+#         'audience': analysis.get('audience', 'General'),
+#         'slides': slides,
+#     }
+
+
+# # ══════════════════════════════════════════════════════════════════
+# #  PUBLIC API
+# # ══════════════════════════════════════════════════════════════════
+
+# def run(raw_data: str) -> dict:
+#     """
+#     Two-pass pipeline:
+#       Pass 1: Analyze content (with chunk summarization for large inputs)
+#       Pass 2: Plan slide narrative (with design seed for variety)
+#     """
+#     from utils.icons import get_all_icon_names, suggest_icons_for_topic
+#     from utils.icon_fetcher import fetch_and_register, detect_unknown_brands
+
+#     join_max = int(getattr(config, "ANALYZER_JOIN_MAX_CHARS", 48_000))
+#     first_n = int(getattr(config, "ANALYZER_FIRST_CHUNK_CHARS", 6000))
+#     last_n = int(getattr(config, "ANALYZER_LAST_CHUNK_CHARS", 4000))
+#     summaries_json_max = int(getattr(config, "ANALYZER_CHUNK_SUMMARIES_JSON_MAX_CHARS", 12_000))
+#     raw_excerpt_max = int(getattr(config, "PLANNER_RAW_EXCERPT_CHARS", 5000))
+#     raw_sample_max = int(getattr(config, "PLANNER_RAW_SAMPLE_STORE_CHARS", 4000))
+#     analysis_json_max = int(getattr(config, "PLANNER_ANALYSIS_JSON_MAX_CHARS", 8000))
+
+#     chunks      = _chunk_text(raw_data)
+#     total_chars = len(raw_data)
+
+#     if not chunks:
+#         print("  [Planner] WARNING: Empty input")
+#         return {}
+
+#     # ── PASS 1A: For large inputs, pre-summarize each chunk ───────
+#     chunk_summaries_section = ""
+#     if len(chunks) > 4:
+#         print(f"  [Planner] Large input ({len(chunks)} chunks) — pre-summarizing all chunks...")
+#         summaries = _summarize_chunks(chunks)
+#         all_facts    = []
+#         all_entities = []
+#         all_anomalies = []
+#         for s in summaries:
+#             all_facts.extend(s.get('facts', []))
+#             all_entities.extend(s.get('entities', []))
+#             all_anomalies.extend(s.get('anomalies', []))
+#         # Deduplicate
+#         all_entities = list(dict.fromkeys(all_entities))[:30]
+#         chunk_summaries_section = (
+#             f"\nCHUNK SUMMARIES (from {len(chunks)} sections of the full document):\n"
+#             + json.dumps({
+#                 "total_facts_extracted": len(all_facts),
+#                 "sample_facts": all_facts[:40],
+#                 "all_entities": all_entities[:25],
+#                 "anomalies": all_anomalies[:15],
+#             }, indent=2)[:summaries_json_max]
+#         )
+#         # Use first + last chunk as text sample; summaries carry the rest
+#         sample = chunks[0][:first_n] + "\n\n---\n\n" + chunks[-1][:last_n]
+#     else:
+#         # Small input: stitch chunks up to ANALYZER_JOIN_MAX_CHARS
+#         joined = "\n\n---\n\n".join(chunks)
+#         sample = joined[: min(len(joined), join_max)]
+#         chunk_summaries_section = ""
+
+#     # ── PASS 1B: LLM Analyzer ────────────────────────────────────
+#     print("  [Planner] Step 1/2: Analyzing content...")
+#     try:
+#         analysis = call_json(
+#             ANALYZER_PROMPT.format(
+#                 text_sample=sample,
+#                 chunk_summaries_section=chunk_summaries_section,
+#                 total_chars=total_chars,
+#                 chunk_count=len(chunks),
+#             ),
+#             key="analyzer",
+#             max_tokens=4000,
+#         )
+#     except Exception as e:
+#         print(f"  [Analyzer] Failed: {e} — using minimal analysis")
+#         analysis = {
+#             "content_type": "general_topic",
+#             "subject": raw_data[:200],
+#             "report_title": "Content Analysis Report",
+#             "report_subtitle": "Auto-Generated Report",
+#             "audience": "General Audience",
+#             "key_entities": [],
+#             "key_facts": [],
+#             "themes": ["Overview", "Key Points", "Analysis", "Conclusions"],
+#             "tone": "informational",
+#             "data_richness": "low",
+#             "narrative_arc": "A comprehensive analysis of the provided content.",
+#         }
+
+#     ct = analysis.get('content_type', 'unknown')
+#     dr = analysis.get('data_richness', 'unknown')
+#     print(f"    Content type: {ct} | Data richness: {dr}")
+#     print(f"    {len(analysis.get('key_facts', []))} facts | {len(analysis.get('themes', []))} themes")
+#     print(f"    Subject: {analysis.get('subject', '')[:80]}")
+
+#     # ── PASS 2: LLM Planner with design seed ─────────────────────
+#     print(f"  [Planner] Step 2/2: Designing slides (seed={config.DESIGN_SEED})...")
+
+#     # Build icon list: topic-specific icons FIRST, then generic fill
+#     subject_text = (
+#         analysis.get('subject', '') + ' ' +
+#         ' '.join(analysis.get('key_entities', [])[:10]) + ' ' +
+#         analysis.get('content_type', '')
+#     )
+
+#     # Attempt to fetch brand icons for any entities we don't recognize
+#     # This runs BEFORE building the icon list so fetched icons appear in the prompt
+#     entities = analysis.get('key_entities', [])
+#     unknown_brands = detect_unknown_brands(entities)
+#     if unknown_brands:
+#         print(f"  [Planner] Detected unknown brands: {unknown_brands[:6]}")
+#         try:
+#             fetch_results = fetch_and_register(unknown_brands[:8])
+#             fetched = [k for k, v in fetch_results.items() if v]
+#             if fetched:
+#                 print(f"  [Planner] Fetched new brand icons: {fetched}")
+#         except Exception as e:
+#             print(f"  [Planner] Icon fetch failed (offline?): {e} — using letter badges")
+#     topic_icons   = suggest_icons_for_topic(subject_text)
+#     all_icons     = get_all_icon_names()
+#     # Deduplicate: topic icons first (LLM will use them first), then rest
+#     seen = set(topic_icons)
+#     remaining = [n for n in sorted(all_icons) if n not in seen]
+#     available_icons = ", ".join(topic_icons + remaining)[:800]
+
+#     if topic_icons:
+#         print(f"    Topic icons injected: {topic_icons[:8]}")
+
+#     try:
+#         plan = call_json(
+#             PLANNER_PROMPT.format(
+#                 n_slides=config.N_SLIDES,
+#                 design_seed=config.DESIGN_SEED,
+#                 analysis=json.dumps(analysis, indent=2)[:analysis_json_max],
+#                 raw_excerpt=sample[:raw_excerpt_max],
+#                 icon_list=available_icons,
+#             ),
+#             key="planner",
+#             max_tokens=8000,
+#         )
+#     except Exception as e:
+#         print(f"  [Planner] LLM failed: {e} — using fallback plan")
+#         plan = {}
+
+#     if not plan.get('slides'):
+#         print("  [Planner] No slides returned — using fallback plan")
+#         plan = _fallback_plan(analysis)
+
+#     # Attach analysis and raw sample for downstream agents
+#     plan['_analysis']    = analysis
+#     plan['_raw_sample']  = sample[:raw_sample_max]
+#     plan['_design_seed'] = config.DESIGN_SEED
+
+#     print(f"  [Planner] Done — {len(plan.get('slides', []))} slides planned")
+#     return plan
+
+
 # agents/planner.py
 #
 # AGENT 0+1 — CONTENT ANALYZER + NARRATIVE PLANNER
 # ══════════════════════════════════════════════════
-# NotebookLM-style architecture:
-#   Step 1 (Python): Chunk raw text (format-agnostic, no regex assumptions)
-#   Step 2 (LLM):    Analyze content — understand what it is, extract facts
-#   Step 3 (LLM):    Design N slide stories based on the analysis
+# NotebookLM-style: two-pass for large inputs.
 #
-# Works with ANY input: alerts, logs, topics, questions, CSV, docs, etc.
-# The LLM does the understanding — Python only does plumbing.
+# Pass 1 (Analyzer): LLM reads chunks and extracts structured facts.
+#                    For large files: summarize each chunk, then synthesize.
+#                    For topic/question inputs: LLM enriches from own knowledge.
+#
+# Pass 2 (Planner):  LLM designs N slide narratives from the analysis.
+#                    Uses DESIGN_SEED to vary layouts every run.
+#                    Each run with same data produces a different visual narrative.
 
-import re, sys, json
+import json, re, sys
 from pathlib import Path
+from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.llm import call_json
 import config
 
 
 # ══════════════════════════════════════════════════════════════════
-#  FORMAT-AGNOSTIC TEXT CHUNKER
-#  Splits any text into digestible pieces — no format assumptions
+#  CHUNKER — format-agnostic, no regex assumptions
 # ══════════════════════════════════════════════════════════════════
 
-def _chunk_text(raw: str, max_chunk_chars: int = 3500) -> list:
+def _chunk_text(raw: str, max_chunk_chars: Optional | None = None) -> list[str]:
+    if max_chunk_chars is None:
+        max_chunk_chars = int(getattr(config, "CHUNK_MAX_CHARS", 8000))
     raw = raw.strip()
     if not raw:
         return []
     if len(raw) <= max_chunk_chars:
         return [raw]
 
-    blocks = re.split(r'\n\s*\n', raw)
+    blocks   = re.split(r'\n\s*\n', raw)
     chunks, current = [], ""
     for block in blocks:
         if len(current) + len(block) > max_chunk_chars and current:
@@ -43,259 +1008,389 @@ def _chunk_text(raw: str, max_chunk_chars: int = 3500) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  LLM ANALYZER PROMPT
-#  The LLM reads raw text and produces a structured understanding.
-#  This replaces all regex parsing — works for any content type.
+#  CHUNK SUMMARIZER — condenses large inputs before analysis
+#  FIX: The original only sent 4 chunks to the analyzer.
+#       Now we summarize every chunk and synthesize them all.
 # ══════════════════════════════════════════════════════════════════
 
-ANALYZER_PROMPT = """You are a content analysis expert. Read the following input carefully and produce a structured analysis.
+CHUNK_SUMMARY_PROMPT = """You are summarizing a section of a larger document for a presentation designer.
+Extract and list ONLY concrete facts, numbers, names, events, and patterns from this section.
+No prose. No headers. Just a bullet list of facts.
 
-INPUT TEXT (this may be a sample of a larger document):
+SECTION:
+{chunk}
+
+Return JSON:
+{{
+  "facts": ["fact 1", "fact 2", "..."],
+  "entities": ["entity1", "entity2"],
+  "anomalies": ["unusual thing 1"]
+}}"""
+
+
+def _summarize_chunks(chunks: list[str]) -> list[dict]:
+    """Summarize each chunk into structured facts. Used for large inputs."""
+    cap = int(getattr(config, "CHUNK_MAX_CHARS", 8000))
+    summary_tokens = int(getattr(config, "CHUNK_SUMMARY_MAX_TOKENS", 2500))
+    summaries = []
+    for i, chunk in enumerate(chunks):
+        print(f"    Summarizing chunk {i+1}/{len(chunks)}...")
+        section = chunk[:cap]
+        try:
+            s = call_json(
+                CHUNK_SUMMARY_PROMPT.format(chunk=section),
+                key="analyzer",
+                max_tokens=summary_tokens,
+            )
+            summaries.append(s)
+        except Exception as e:
+            print(f"    Chunk {i+1} summary failed: {e} — using raw text")
+            summaries.append({
+                "facts": [section[:cap]],
+                "entities": [],
+                "anomalies": [],
+            })
+    return summaries
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ANALYZER PROMPT
+# ══════════════════════════════════════════════════════════════════
+
+ANALYZER_PROMPT = """You are a world-class content analyst preparing source material for a NotebookLM-quality PDF report.
+Deeply understand the input and extract everything a presentation designer needs.
+
+INPUT TEXT:
 {text_sample}
 
-TOTAL INPUT SIZE: {total_chars} characters across {chunk_count} sections.
+{chunk_summaries_section}
 
-Your job: Understand what this content is about and extract structured facts for a presentation designer.
+TOTAL INPUT: {total_chars} characters across {chunk_count} sections.
 
-Determine ALL of the following:
+Determine ALL of the following with maximum specificity:
 
-1. content_type: What kind of content is this?
-   Examples: "infrastructure_alerts", "application_logs", "technical_topic", "educational_content",
-   "business_report", "research_paper", "how_to_guide", "product_documentation",
-   "incident_report", "performance_metrics", "general_knowledge_request", etc.
+1. content_type — What kind of content is this?
+   E.g.: "infrastructure_alerts", "application_logs", "kubernetes_tutorial",
+   "aws_architecture", "incident_report", "performance_metrics",
+   "sre_runbook", "capacity_analysis", "error_analysis", "security_audit",
+   "research_paper", "business_report", "how_to_guide", "general_topic"
 
-2. subject: What is this about? (2-3 sentence summary)
+   IMPORTANT: Use "infrastructure_alerts", "application_logs", "incident_report",
+   "performance_metrics", "error_analysis", or "capacity_analysis" when the input
+   contains log lines, alert messages, error counts, latency metrics, or system events.
+   These content types REQUIRE a risk_impact_matrix slide (see Rule 10 below).
 
-3. report_title: A compelling, specific title for a PDF report about this content.
+2. subject — 2-3 sentence summary of exactly what this content is about.
 
-4. report_subtitle: A professional subtitle.
+3. report_title — A compelling, specific, journalistic title (NOT generic).
+   BAD: "Kubernetes Overview"
+   GOOD: "Kubernetes at Scale: Architecture, Failures & Recovery Patterns"
 
-5. audience: Who would read a report about this? (e.g. "SRE Leadership", "Engineering Team",
-   "Students", "Business Executives", "General Audience")
+4. report_subtitle — A professional subtitle with context (audience, date range, etc.)
 
-6. key_entities: Important names, systems, metrics, hosts, tools, concepts found in the data (up to 15).
+5. audience — Who reads this? Be specific.
+   E.g.: "Senior SRE Team", "Platform Engineering Leads", "Kubernetes Beginners",
+   "Cloud Architecture Decision Makers", "DevOps Engineers"
 
-7. key_facts: The most important findings — quantitative OR qualitative (up to 20).
-   For data-rich input: extract exact numbers, percentages, counts, timestamps.
-   For topic/question input: generate the key facts from your own knowledge about the subject.
+6. key_entities — Named items found: hosts, services, tools, concepts, companies (up to 20).
 
-8. themes: 4-8 major themes/categories that presentation slides could be organized around.
-   Each theme should be a distinct angle worth a slide or two.
+7. key_facts — The most important facts. MUST include exact numbers when available.
+   For data-rich input (logs/alerts/metrics): extract REAL values, timestamps, counts.
+   For topic/educational input: generate REAL authoritative facts from your knowledge.
+   BAD: "Many errors occurred"
+   GOOD: "1,847 critical alerts fired between 03:00-07:00 UTC, 73% from storage cluster"
+   BAD: "Kubernetes manages containers"
+   GOOD: "Kubernetes orchestrates containers via 3 control plane components: API server, etcd, scheduler. etcd stores all cluster state as key-value pairs."
 
-9. tone: What tone should the report use?
-   "urgent" — critical issues, immediate action needed
-   "analytical" — deep technical analysis
-   "educational" — teaching/explaining concepts
-   "executive_summary" — high-level business view
-   "informational" — neutral, balanced overview
+8. themes — 5-8 distinct angles/chapters for the presentation. Each should be a specific
+   story arc, not a generic category.
+   BAD: ["Overview", "Details", "Conclusion"]
+   GOOD: ["The 3AM Cascading Failure Chain", "etcd Saturation as Root Cause",
+          "Cross-Zone Dependency Mapping", "Recovery Playbook"]
 
-10. data_richness: How much concrete data is in the input?
-    "high" — lots of numbers, metrics, timestamps, specific data points
-    "medium" — some data points mixed with narrative
-    "low" — mostly conceptual, topic-based, or a question. YOU must enrich with your own knowledge.
+9. tone — "urgent" | "analytical" | "educational" | "executive_summary" | "informational"
 
-CRITICAL RULE for data_richness="low":
-If the input is a topic or question (like "tell me about Kubernetes" or "explain machine learning"),
-you MUST populate key_facts with REAL, ACCURATE facts from your own knowledge. Include real numbers,
-real architecture details, real comparisons — as if you were an expert writing a reference document.
+10. data_richness — "high" | "medium" | "low"
+    high = real numbers, real timestamps, real names throughout
+    low  = topic/question input — YOU must fill key_facts with real authoritative knowledge
 
-Return ONLY valid JSON (no markdown, no fences):
+11. narrative_arc — One sentence describing the story this report tells.
+    E.g.: "A cascading storage failure that started as a misconfiguration and escalated into a 4-hour outage affecting 3 services."
+
+CRITICAL for data_richness="low":
+If the input is a question or topic (e.g. "explain AWS", "make a PDF on ML"),
+you MUST populate key_facts with 15-20 REAL, ACCURATE, SPECIFIC facts from your knowledge.
+Include real numbers, real names, real architecture details. Be an expert, not a generalist.
+
+Return ONLY valid JSON:
 {{
   "content_type": "...",
   "subject": "...",
   "report_title": "...",
   "report_subtitle": "...",
   "audience": "...",
-  "key_entities": ["entity1", "entity2", "..."],
+  "key_entities": ["entity1", ...],
   "key_facts": [
-    {{"fact": "Concrete fact or data point", "category": "theme it belongs to", "importance": "high"}},
-    {{"fact": "Another fact", "category": "...", "importance": "medium"}},
+    {{"fact": "Specific fact with real data", "category": "theme it belongs to", "importance": "high"}},
     ...
   ],
-  "themes": ["Theme 1", "Theme 2", "Theme 3", "..."],
+  "themes": ["Theme 1", "Theme 2", ...],
   "tone": "analytical",
-  "data_richness": "high"
+  "data_richness": "high",
+  "narrative_arc": "..."
 }}"""
 
 
 # ══════════════════════════════════════════════════════════════════
-#  LLM PLANNER PROMPT — UNIVERSAL
-#  Works for any content type: alerts, logs, topics, docs, etc.
+#  PLANNER PROMPT — uses DESIGN_SEED for visual variety
 # ══════════════════════════════════════════════════════════════════
 
-PLANNER_PROMPT = """You are an expert presentation architect who creates NotebookLM-quality slide decks.
-You have been given a structured analysis of source content.
-Design a {n_slides}-slide PDF report that tells a COMPELLING, SPECIFIC story.
+PLANNER_PROMPT = """You are an expert presentation architect creating a NotebookLM-quality PDF.
+Design {n_slides} slides that tell a SPECIFIC, VISUAL, COMPELLING story.
+
+DESIGN SEED: {design_seed}
+Use this seed to make creative layout and color choices. Different seeds = different aesthetics.
+High seed (>5000): bold, asymmetric, dramatic. Low seed (<3000): refined, structured, minimal.
+Mid seed: balanced editorial. Vary your visual type choices based on this seed.
 
 CONTENT ANALYSIS:
 {analysis}
 
-RAW SOURCE EXCERPT (for additional context and exact quotes):
+RAW SOURCE EXCERPT (for additional context):
 {raw_excerpt}
 
-STYLE TARGET: Match NotebookLM quality — each slide must have:
-  - A unique, journalistic TITLE (not generic like "Overview" or "Introduction")
-  - A specific INSIGHT that would surprise or inform the reader
-  - A visual that BEST SHOWS that specific insight
-  - Real data, real names, real numbers (from the analysis or from your own knowledge)
+AVAILABLE ICON NAMES (use ONLY these exact names in the "icon" fields):
+{icon_list}
 
-VISUAL TYPES you can use (pick the best fit per slide):
-  - cover_hero           : large title + 3 preview cards (for slide 1 only)
-  - big_number_hero      : huge single stat + context
-  - bar_chart_annotated  : bar chart with threshold lines and callouts
-  - area_chart_gradient  : area/line chart showing trends over time
-  - funnel_diagram       : multi-stage breakdown or flow
-  - topology_map         : system/concept topology with colored nodes
-  - matrix_table         : comparison grid (e.g. teams x impact, features x products)
-  - flap_chart           : oscillation/cycle visualization
-  - domino_chain         : cascading cause-effect cards with arrows
-  - comparison_panel     : side-by-side comparison panels
-  - priority_table       : action table with categorized columns
-  - scatter_quadrant     : 2x2 quadrant analysis
-  - stat_cards_row       : 4 metric/concept cards in a row
-  - timeline_events      : horizontal timeline of key events or milestones
-  - concept_diagram      : visual explanation of architecture or workflow
-  - info_cards_grid      : grid of information cards with icons
-
-LAYOUT OPTIONS:
-  - centered             : visual in center, short context below
-  - left_text_right_visual : key insight left, custom visual right
-  - full_visual          : data visualization fills most of the slide
-  - two_panel            : two equal panels side by side
-  - header_plus_grid     : heading + grid of cards/items below
+VISUAL TYPES — choose the best fit, vary them across slides:
+  cover_hero           → Full-bleed cover: giant title + 3 preview insight cards
+  big_number_hero      → One massive stat fills the slide (text-9xl, context below)
+  stat_cards_row       → 4 equal metric/concept cards in a grid
+  bar_chart_annotated  → Chart.js bar chart with callout annotations
+  area_chart_gradient  → Chart.js area/line chart showing trend over time
+  timeline_events      → Horizontal timeline of key events with milestones
+  topology_map         → CSS node/card diagram — system architecture or concept map
+  matrix_table         → HTML comparison table (teams × dimensions, options × criteria)
+  domino_chain         → Horizontal cause-effect cards with arrows between them
+  comparison_panel     → Two equal panels, each with chart or stats inside
+  priority_table       → Styled action table: Item | Priority | Action columns
+  risk_impact_matrix   → ★ 2×2 Risk/Impact quadrant — REQUIRED for alerts/logs/incidents
+                         Left 65%: four quadrants (High/Low Impact × High/Low Effort)
+                         Each quadrant has real items from the data with icon + stat
+                         Right 35%: Strategic Guidance + Immediate Action callout
+  scatter_quadrant     → 2×2 grid (Impact vs Effort, Risk vs Value, etc.)
+  funnel_diagram       → Funnel/pipeline showing stages with counts
+  info_cards_grid      → 2×2 or 3×2 grid of rich content cards with icons
+  concept_diagram      → 3-6 step workflow with connectors (architecture, process)
+  two_column_bullets   → Left: key insight panel; Right: bullet list with icons
+  callout_hero         → Large pull-quote or key finding with supporting stats below
 
 COLOR MOODS:
-  - critical_red   : #C0392B accent — urgent, broken, immediate action
-  - warning_amber  : #D4880E accent — degraded, at-risk, watch closely
-  - info_blue      : #2471A3 accent — informational, educational, context
-  - neutral        : #555555 accent — conclusion, summary, recommendations
-  - success_green  : #1E8449 accent — positive, achievements, solutions
+  critical_red    → #C0392B accent (urgent, broken, failure)
+  warning_amber   → #D4880E accent (degraded, at-risk)
+  info_blue       → #2471A3 accent (informational, educational)
+  success_green   → #1E8449 accent (achievements, solutions, health)
+  neutral_slate   → #4A5568 accent (summary, conclusion, overview)
+  deep_purple     → #6B46C1 accent (innovation, AI, future)
+  teal_focus      → #0D9488 accent (process, flow, systems)
 
-RULES:
-1. Slide 1 MUST be a cover slide that sets the stage with title + 3 preview highlights
-2. Final slide MUST be a conclusion/recommendations/key-takeaways slide
-3. Each slide should use a DIFFERENT visual_type — variety keeps it engaging
-4. If the content analysis has data_richness="high", use EXACT numbers from key_facts
-5. If data_richness="low", use YOUR OWN KNOWLEDGE to create rich, accurate content.
-   Include real facts, real numbers, real architecture details — not placeholder text.
-6. Titles must be SPECIFIC and journalistic, not generic
-7. visual_description must be detailed enough for another LLM to draw it from scratch
-8. Include the actual data values needed in the "data" field for each slide
-9. Every slide must have a clear story_angle — WHY does this slide matter?
-10. The "data" field should contain all values the visual designer needs to render the slide
+RULES — read carefully:
+1. Slide 1 MUST be cover_hero. Final slide MUST be a conclusion/takeaways slide.
+2. Use at LEAST 6 different visual_types across all slides.
+3. Titles must be JOURNALISTIC and SPECIFIC — not generic labels.
+   BAD: "System Overview" | GOOD: "Why Three Services Went Dark at 3AM"
+4. The "data" field must contain ALL values the designer needs to render the slide.
+   Include real numbers, real names, real labels — never say "see analysis".
+5. story_angle must explain WHY this slide matters to the audience.
+6. For "icon" fields in data: use ONLY names from the AVAILABLE ICON NAMES list above.
+7. Each slide needs a unique visual_type — minimize repeats.
+8. "visual_description" must be detailed enough for a designer to render from scratch.
+9. If data_richness is "low", use your knowledge to create REAL data values in the data field.
+10. ★ MANDATORY for content_type=alerts/logs/incidents/performance_metrics:
+    MUST include exactly ONE slide with visual_type="risk_impact_matrix".
+    Use this EXACT data schema for that slide:
+    {{
+      "visual_type": "risk_impact_matrix",
+      "data": {{
+        "x_axis_label": "IMPACT",
+        "y_axis_label": "EFFORT",
+        "high_impact_low_effort": [
+          {{"name": "Issue/item name", "icon": "icon-name", "stat": "e.g. 847 errors/hr", "severity": "critical"}}
+        ],
+        "high_impact_high_effort": [
+          {{"name": "Issue/item name", "icon": "icon-name", "stat": "e.g. 23% lag", "severity": "high"}}
+        ],
+        "low_impact_low_effort": [
+          {{"name": "Quick win item", "icon": "icon-name", "stat": "e.g. 12 alerts", "severity": "low"}}
+        ],
+        "low_impact_high_effort": [
+          {{"name": "Deprioritize item", "icon": "icon-name", "stat": "e.g. 4 issues", "severity": "medium"}}
+        ],
+        "strategic_guidance": "2-3 sentence guidance on where to focus first and why",
+        "immediate_action": "One concrete action required now (specific, not generic)",
+        "system_health": "Nominal | Degraded | Critical",
+        "last_sync": "timestamp or data freshness label"
+      }}
+    }}
+    Populate EVERY quadrant with real items from the analysis. Never leave a quadrant empty.
 
-Return ONLY valid JSON (no markdown, no fences):
+Return ONLY valid JSON:
 {{
-  "report_title": "{report_title}",
-  "report_subtitle": "{report_subtitle}",
-  "audience": "{audience}",
+  "report_title": "...",
+  "report_subtitle": "...",
+  "audience": "...",
   "slides": [
     {{
       "slot": 1,
       "title": "Compelling specific title",
       "subtitle": "Contextual subtitle",
       "story_angle": "Why this slide matters",
-      "key_insight": "The one thing the reader should take away",
+      "key_insight": "The one thing the reader takes away",
       "visual_type": "cover_hero",
-      "visual_description": "Detailed description of what to render visually",
-      "layout_hint": "centered",
-      "color_mood": "neutral",
+      "visual_description": "Detailed visual description",
+      "layout_hint": "centered | left_text_right_visual | full_visual | header_plus_grid",
+      "color_mood": "neutral_slate",
       "data": {{
-        "relevant_key": "relevant_value"
+        "key": "value — real data, real numbers"
       }}
-    }},
-    ... (continue for all {n_slides} slides)
+    }}
   ]
 }}"""
 
 
 # ══════════════════════════════════════════════════════════════════
-#  FALLBACK PLAN — generic, works for any content
+#  FALLBACK PLAN
 # ══════════════════════════════════════════════════════════════════
 
 def _fallback_plan(analysis: dict) -> dict:
-    """Build a minimal plan from the analysis when the planner LLM fails."""
-    themes = analysis.get('themes', ['Overview', 'Details', 'Analysis'])
-    facts  = analysis.get('key_facts', [])
-    title  = analysis.get('report_title', 'Report')
-    subtitle = analysis.get('report_subtitle', 'Generated Report')
+    themes      = analysis.get('themes', ['Overview', 'Details', 'Analysis', 'Summary'])
+    facts       = analysis.get('key_facts', [])
+    title       = analysis.get('report_title', 'Report')
+    subtitle    = analysis.get('report_subtitle', 'Generated Report')
+    content_type = analysis.get('content_type', 'general_topic')
 
-    slides = [
-        {
-            'slot': 1,
-            'title': title,
-            'subtitle': subtitle,
-            'story_angle': 'Cover slide: set the stage',
-            'key_insight': analysis.get('subject', 'Comprehensive analysis'),
-            'visual_type': 'cover_hero',
-            'layout_hint': 'centered',
-            'color_mood': 'neutral',
-            'visual_description': f'Cover with title "{title}", subtitle, and 3 preview cards for top themes.',
-            'data': {
-                'title': title,
-                'subtitle': subtitle,
-                'preview_items': [
-                    {'label': t, 'sub': 'Key topic'} for t in themes[:3]
-                ],
-            },
-        },
-        {
-            'slot': 2,
-            'title': 'Executive Summary',
-            'subtitle': '',
-            'story_angle': 'Key metrics and findings at a glance',
-            'key_insight': analysis.get('subject', ''),
-            'visual_type': 'stat_cards_row',
-            'layout_hint': 'full_visual',
-            'color_mood': 'info_blue',
-            'visual_description': 'Four stat cards showing the most important facts or concepts.',
-            'data': {
-                'cards': [
-                    {'label': f.get('fact', '')[:60], 'category': f.get('category', '')}
-                    for f in facts[:4]
-                ] if facts else [{'label': 'See analysis', 'category': 'Overview'}],
-            },
-        },
+    vt_cycle = [
+        'stat_cards_row', 'bar_chart_annotated', 'info_cards_grid',
+        'timeline_events', 'topology_map', 'concept_diagram', 'priority_table',
+    ]
+    cm_cycle = [
+        'info_blue', 'warning_amber', 'neutral_slate',
+        'critical_red', 'success_green', 'deep_purple', 'teal_focus',
     ]
 
-    visual_types = ['bar_chart_annotated', 'comparison_panel', 'info_cards_grid',
-                    'timeline_events', 'topology_map', 'matrix_table']
+    # Determine if this is operational/alert content requiring risk matrix
+    ALERT_TYPES = {
+        'infrastructure_alerts', 'application_logs', 'incident_report',
+        'performance_metrics', 'error_analysis', 'capacity_analysis',
+        'sre_runbook', 'security_audit',
+    }
+    needs_risk_matrix = content_type in ALERT_TYPES
 
-    for i, theme in enumerate(themes[:6], 3):
-        theme_facts = [f for f in facts if f.get('category', '').lower() == theme.lower()]
-        if not theme_facts:
-            theme_facts = facts[min(i-3, len(facts)-1):min(i-3+3, len(facts))] if facts else []
+    slides = [{
+        'slot': 1,
+        'title': title,
+        'subtitle': subtitle,
+        'story_angle': 'Set the stage with key highlights',
+        'key_insight': analysis.get('subject', ''),
+        'visual_type': 'cover_hero',
+        'visual_description': f'Cover with title "{title}", subtitle, and 3 preview theme cards.',
+        'layout_hint': 'centered',
+        'color_mood': 'neutral_slate',
+        'data': {
+            'title': title,
+            'subtitle': subtitle,
+            'preview_cards': [
+                {'title': t, 'description': 'Key topic', 'icon': 'lightbulb'}
+                for t in themes[:3]
+            ],
+        },
+    }]
 
+    for i, theme in enumerate(themes[:8], 2):
+        tf = [f for f in facts if f.get('category', '').lower() == theme.lower()]
+        if not tf:
+            tf = facts[max(0, i-2):min(i+1, len(facts))]
         slides.append({
             'slot': i,
-            'title': f'Deep Dive: {theme}',
+            'title': theme,
             'subtitle': '',
-            'story_angle': f'Detailed analysis of {theme}',
-            'key_insight': theme_facts[0].get('fact', f'Analysis of {theme}') if theme_facts else f'Analysis of {theme}',
-            'visual_type': visual_types[(i - 3) % len(visual_types)],
-            'layout_hint': 'left_text_right_visual',
-            'color_mood': ['info_blue', 'warning_amber', 'neutral', 'critical_red', 'success_green', 'info_blue'][(i - 3) % 6],
+            'story_angle': f'Analysis of {theme}',
+            'key_insight': tf[0].get('fact', f'Key insights about {theme}') if tf else f'Key insights about {theme}',
+            'visual_type': vt_cycle[(i - 2) % len(vt_cycle)],
             'visual_description': f'Visual showing key aspects of {theme} with real data.',
+            'layout_hint': 'left_text_right_visual',
+            'color_mood': cm_cycle[(i - 2) % len(cm_cycle)],
+            'data': {'theme': theme, 'facts': [f.get('fact', '') for f in tf[:5]]},
+        })
+
+    # Add risk_impact_matrix for operational content (guaranteed via Python renderer)
+    if needs_risk_matrix:
+        # Extract items from facts by importance
+        critical = [f.get('fact', '') for f in facts if f.get('importance') == 'high']
+        medium   = [f.get('fact', '') for f in facts if f.get('importance') == 'medium']
+        low_f    = [f.get('fact', '') for f in facts if f.get('importance') == 'low']
+        entities = analysis.get('key_entities', [])
+
+        def _fact_to_item(fact_str: str, idx: int, icon_name: str = 'alert-circle') -> dict:
+            parts = fact_str[:60].split(':')
+            name  = parts[0].strip()[:40] if len(parts) > 1 else fact_str[:35]
+            stat  = parts[1].strip()[:25] if len(parts) > 1 else ""
+            return {'name': name, 'icon': icon_name, 'stat': stat, 'severity': 'high'}
+
+        hi_lo_items = [_fact_to_item(f, i, 'zap')           for i, f in enumerate(critical[:2])]
+        hi_hi_items = [_fact_to_item(f, i, 'database')      for i, f in enumerate(critical[2:4])]
+        lo_lo_items = [_fact_to_item(f, i, 'settings')      for i, f in enumerate(low_f[:2])]
+        lo_hi_items = [_fact_to_item(f, i, 'git-branch')    for i, f in enumerate(medium[:2])]
+
+        # Ensure no empty quadrants
+        if not hi_lo_items: hi_lo_items = [{'name': 'Primary Alert', 'icon': 'alert-triangle', 'stat': 'See analysis', 'severity': 'critical'}]
+        if not hi_hi_items: hi_hi_items = [{'name': 'Complex Issue', 'icon': 'layers',          'stat': 'Needs planning', 'severity': 'high'}]
+        if not lo_lo_items: lo_lo_items = [{'name': 'Minor Items',   'icon': 'info',             'stat': 'Low priority', 'severity': 'low'}]
+        if not lo_hi_items: lo_hi_items = [{'name': 'Tech Debt',     'icon': 'clock',            'stat': 'Deferred', 'severity': 'medium'}]
+
+        slides.append({
+            'slot': len(slides) + 1,
+            'title': 'Risk vs. Impact Analysis',
+            'subtitle': 'Prioritizing remediation efforts for operational stability',
+            'story_angle': 'Which issues should we fix first to maximize system reliability?',
+            'key_insight': 'Address High Impact / Low Effort items immediately to restore stability',
+            'visual_type': 'risk_impact_matrix',
+            'visual_description': '2×2 risk/impact matrix with remediation guidance and system health status',
+            'layout_hint': 'full_visual',
+            'color_mood': 'critical_red',
             'data': {
-                'theme': theme,
-                'facts': [f.get('fact', '') for f in theme_facts[:5]],
+                'x_axis_label': 'IMPACT',
+                'y_axis_label': 'EFFORT',
+                'high_impact_low_effort': hi_lo_items,
+                'high_impact_high_effort': hi_hi_items,
+                'low_impact_low_effort': lo_lo_items,
+                'low_impact_high_effort': lo_hi_items,
+                'strategic_guidance': (
+                    f'Focus remediation on the High Impact quadrant first. '
+                    f'{"Key entities " + ", ".join(entities[:3]) + " " if entities else ""}'
+                    f'represent critical architectural bottlenecks directly correlating to downtime. '
+                    f'Address High Impact / Low Effort items before tackling complex systemic issues.'
+                ),
+                'immediate_action': (
+                    critical[0] if critical
+                    else 'Review all critical alerts and escalate to on-call team immediately.'
+                ),
+                'system_health': 'Critical' if critical else 'Degraded',
+                'last_sync': 'Analysis timestamp',
             },
         })
 
     slides.append({
         'slot': len(slides) + 1,
-        'title': 'Key Takeaways & Recommendations',
+        'title': 'Key Takeaways & Next Steps',
         'subtitle': '',
         'story_angle': 'Actionable conclusions',
-        'key_insight': 'Summary of findings and next steps',
+        'key_insight': 'Summary of findings and recommended actions',
         'visual_type': 'priority_table',
+        'visual_description': 'Action table with key findings and next steps.',
         'layout_hint': 'full_visual',
-        'color_mood': 'neutral',
-        'visual_description': 'Table with key findings, recommendations, and action items.',
-        'data': {
-            'themes': themes[:6],
-            'top_facts': [f.get('fact', '') for f in facts[:5]] if facts else [],
-        },
+        'color_mood': 'neutral_slate',
+        'data': {'themes': themes[:6], 'top_facts': [f.get('fact', '') for f in facts[:5]]},
     })
 
     return {
@@ -311,83 +1406,152 @@ def _fallback_plan(analysis: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════
 
 def run(raw_data: str) -> dict:
-    """Analyze any content and plan slides. No format assumptions."""
+    """
+    Two-pass pipeline:
+      Pass 1: Analyze content (with chunk summarization for large inputs)
+      Pass 2: Plan slide narrative (with design seed for variety)
+    """
+    from utils.icons import get_all_icon_names, suggest_icons_for_topic
+    from utils.icon_fetcher import fetch_and_register, detect_unknown_brands
 
-    # Step 1: Chunk the input (format-agnostic)
-    chunks = _chunk_text(raw_data)
+    join_max = int(getattr(config, "ANALYZER_JOIN_MAX_CHARS", 48_000))
+    first_n = int(getattr(config, "ANALYZER_FIRST_CHUNK_CHARS", 6000))
+    last_n = int(getattr(config, "ANALYZER_LAST_CHUNK_CHARS", 4000))
+    summaries_json_max = int(getattr(config, "ANALYZER_CHUNK_SUMMARIES_JSON_MAX_CHARS", 12_000))
+    raw_excerpt_max = int(getattr(config, "PLANNER_RAW_EXCERPT_CHARS", 5000))
+    raw_sample_max = int(getattr(config, "PLANNER_RAW_SAMPLE_STORE_CHARS", 4000))
+    analysis_json_max = int(getattr(config, "PLANNER_ANALYSIS_JSON_MAX_CHARS", 8000))
+
+    chunks      = _chunk_text(raw_data)
+    total_chars = len(raw_data)
+
     if not chunks:
         print("  [Planner] WARNING: Empty input")
         return {}
 
-    total_chars = len(raw_data)
-    # Build a representative sample: first chunks + last chunk for variety
-    if len(chunks) <= 3:
-        sample = "\n\n---\n\n".join(chunks)
+    # ── PASS 1A: For large inputs, pre-summarize each chunk ───────
+    chunk_summaries_section = ""
+    if len(chunks) > 4:
+        print(f"  [Planner] Large input ({len(chunks)} chunks) — pre-summarizing all chunks...")
+        summaries = _summarize_chunks(chunks)
+        all_facts    = []
+        all_entities = []
+        all_anomalies = []
+        for s in summaries:
+            all_facts.extend(s.get('facts', []))
+            all_entities.extend(s.get('entities', []))
+            all_anomalies.extend(s.get('anomalies', []))
+        # Deduplicate
+        all_entities = list(dict.fromkeys(all_entities))[:30]
+        chunk_summaries_section = (
+            f"\nCHUNK SUMMARIES (from {len(chunks)} sections of the full document):\n"
+            + json.dumps({
+                "total_facts_extracted": len(all_facts),
+                "sample_facts": all_facts[:40],
+                "all_entities": all_entities[:25],
+                "anomalies": all_anomalies[:15],
+            }, indent=2)[:summaries_json_max]
+        )
+        # Use first + last chunk as text sample; summaries carry the rest
+        sample = chunks[0][:first_n] + "\n\n---\n\n" + chunks[-1][:last_n]
     else:
-        sample = "\n\n---\n\n".join(chunks[:2] + [chunks[len(chunks)//2]] + [chunks[-1]])
-    sample = sample[:config.MAX_DATA_CHARS]
+        # Small input: stitch chunks up to ANALYZER_JOIN_MAX_CHARS
+        joined = "\n\n---\n\n".join(chunks)
+        sample = joined[: min(len(joined), join_max)]
+        chunk_summaries_section = ""
 
-    # Step 2: LLM Analyzer — understands the content
-    print("  [Planner] Step 1/3: LLM analyzing content...")
+    # ── PASS 1B: LLM Analyzer ────────────────────────────────────
+    print("  [Planner] Step 1/2: Analyzing content...")
     try:
         analysis = call_json(
             ANALYZER_PROMPT.format(
-                text_sample=sample[:6000],
+                text_sample=sample,
+                chunk_summaries_section=chunk_summaries_section,
                 total_chars=total_chars,
                 chunk_count=len(chunks),
             ),
             key="analyzer",
-            max_tokens=3000,
+            max_tokens=4000,
         )
     except Exception as e:
-        print(f"    [Analyzer] LLM failed: {e}")
+        print(f"  [Analyzer] Failed: {e} — using minimal analysis")
         analysis = {
-            "content_type": "unknown",
+            "content_type": "general_topic",
             "subject": raw_data[:200],
             "report_title": "Content Analysis Report",
             "report_subtitle": "Auto-Generated Report",
-            "audience": "General",
+            "audience": "General Audience",
             "key_entities": [],
             "key_facts": [],
-            "themes": ["Overview", "Details", "Summary"],
+            "themes": ["Overview", "Key Points", "Analysis", "Conclusions"],
             "tone": "informational",
             "data_richness": "low",
+            "narrative_arc": "A comprehensive analysis of the provided content.",
         }
 
     ct = analysis.get('content_type', 'unknown')
     dr = analysis.get('data_richness', 'unknown')
-    n_facts = len(analysis.get('key_facts', []))
-    n_themes = len(analysis.get('themes', []))
     print(f"    Content type: {ct} | Data richness: {dr}")
-    print(f"    {n_facts} facts extracted | {n_themes} themes identified")
+    print(f"    {len(analysis.get('key_facts', []))} facts | {len(analysis.get('themes', []))} themes")
     print(f"    Subject: {analysis.get('subject', '')[:80]}")
 
-    # Step 3: LLM Planner — designs the slide narrative
-    print("  [Planner] Step 2/3: LLM designing slide narratives...")
+    # ── PASS 2: LLM Planner with design seed ─────────────────────
+    print(f"  [Planner] Step 2/2: Designing slides (seed={config.DESIGN_SEED})...")
+
+    # Build icon list: topic-specific icons FIRST, then generic fill
+    subject_text = (
+        analysis.get('subject', '') + ' ' +
+        ' '.join(analysis.get('key_entities', [])[:10]) + ' ' +
+        analysis.get('content_type', '')
+    )
+
+    # Attempt to fetch brand icons for any entities we don't recognize
+    # This runs BEFORE building the icon list so fetched icons appear in the prompt
+    entities = analysis.get('key_entities', [])
+    unknown_brands = detect_unknown_brands(entities)
+    if unknown_brands:
+        print(f"  [Planner] Detected unknown brands: {unknown_brands[:6]}")
+        try:
+            fetch_results = fetch_and_register(unknown_brands[:8])
+            fetched = [k for k, v in fetch_results.items() if v]
+            if fetched:
+                print(f"  [Planner] Fetched new brand icons: {fetched}")
+        except Exception as e:
+            print(f"  [Planner] Icon fetch failed (offline?): {e} — using letter badges")
+    topic_icons   = suggest_icons_for_topic(subject_text)
+    all_icons     = get_all_icon_names()
+    # Deduplicate: topic icons first (LLM will use them first), then rest
+    seen = set(topic_icons)
+    remaining = [n for n in sorted(all_icons) if n not in seen]
+    available_icons = ", ".join(topic_icons + remaining)[:800]
+
+    if topic_icons:
+        print(f"    Topic icons injected: {topic_icons[:8]}")
+
     try:
         plan = call_json(
             PLANNER_PROMPT.format(
-                analysis=json.dumps(analysis, indent=2)[:5000],
-                raw_excerpt=sample[:2500],
                 n_slides=config.N_SLIDES,
-                report_title=analysis.get('report_title', 'Report'),
-                report_subtitle=analysis.get('report_subtitle', 'Generated Report'),
-                audience=analysis.get('audience', 'General'),
+                design_seed=config.DESIGN_SEED,
+                analysis=json.dumps(analysis, indent=2)[:analysis_json_max],
+                raw_excerpt=sample[:raw_excerpt_max],
+                icon_list=available_icons,
             ),
             key="planner",
             max_tokens=8000,
         )
     except Exception as e:
-        print(f"    [Planner] LLM failed: {e}")
+        print(f"  [Planner] LLM failed: {e} — using fallback plan")
         plan = {}
 
     if not plan.get('slides'):
-        print("    [Planner] Warning: LLM returned no slides — building fallback plan")
+        print("  [Planner] No slides returned — using fallback plan")
         plan = _fallback_plan(analysis)
 
-    # Attach analysis to the plan so downstream agents can use it
-    plan['_analysis'] = analysis
-    plan['_raw_sample'] = sample[:2000]
-    n = len(plan.get('slides', []))
-    print(f"  [Planner] Done — {n} slides planned")
+    # Attach analysis and raw sample for downstream agents
+    plan['_analysis']    = analysis
+    plan['_raw_sample']  = sample[:raw_sample_max]
+    plan['_design_seed'] = config.DESIGN_SEED
+
+    print(f"  [Planner] Done — {len(plan.get('slides', []))} slides planned")
     return plan
