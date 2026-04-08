@@ -2095,10 +2095,12 @@ risk_impact_matrix:
 
   RULES for risk_impact_matrix:
   - ALL FOUR quadrants must have at least 1 item — NEVER leave a quadrant empty
+  - When SLIDE DATA has enough issues: include 2-4+ items per quadrant (not one lonely row)
+  - Each item in data may include optional "detail" (or "description") — render as a second line
   - HIGH IMPACT / LOW EFFORT items: RED border, "DO FIRST" badge, bold text
   - HIGH IMPACT / HIGH EFFORT items: AMBER border, "PLAN" badge
   - LOW quadrant items: muted styling, smaller text, no badge
-  - Each item: [[icon:NAME:20:COLOR]] + bold name + font-mono stat
+  - Each item: [[icon:NAME:20:COLOR]] + bold name + font-mono stat (+ detail if present)
   - Right panel shows count of high-impact items as large numbers
   - strategic_guidance: 2-3 sentences specific to THIS data (not generic)
   - immediate_action: ONE specific action with deadline/owner if available
@@ -2342,27 +2344,43 @@ def _render_risk_impact_matrix(slide: dict, style: dict, plan: dict = None) -> s
 
     def safe(v): return _html.escape(str(v)) if v else ""
 
+    max_per_q = int(getattr(config, "RISK_MATRIX_QUADRANT_MAX_ITEMS", 6))
+
     # ── Parse quadrant items ──────────────────────────────────────
     def render_items(items: list, accent: str, badge_text: str = "") -> str:
         if not items:
             return f'<p class="text-[10px] text-[{muted}] italic">No items in this quadrant</p>'
         out = ""
-        for item in items[:3]:
-            name     = safe(item.get('name', ''))
-            stat     = safe(item.get('stat', ''))
-            ic_name  = item.get('icon', 'alert-circle')
-            ic_svg   = render_icon(ic_name, 18, accent)
-            badge    = (f'<span style="background:{accent};color:white;font-size:8px;'
-                        f'font-weight:700;padding:1px 5px;border-radius:3px;margin-left:auto;'
-                        f'white-space:nowrap">{badge_text}</span>'
-                        if badge_text else "")
+        for j, item in enumerate(items[:max_per_q]):
+            name = safe(item.get('name', ''))
+            stat = safe(item.get('stat', ''))
+            detail_raw = item.get('detail') or item.get('description') or ''
+            detail = safe(detail_raw)
+            detail_html = ""
+            if detail:
+                detail_html = (
+                    f'<div style="font-size:8px;color:{muted};line-height:1.3;margin-top:2px;'
+                    f'word-break:break-word;max-height:2.6em;overflow:hidden">{detail}</div>'
+                )
+            ic_name = item.get('icon', 'alert-circle')
+            ic_svg = render_icon(ic_name, 16, accent)
+            # One badge per quadrant (first row) — avoids repeating "NOW" on every item
+            show_badge = bool(badge_text) and j == 0
+            badge = (
+                f'<div style="flex-shrink:0;align-self:flex-start">'
+                f'<span style="background:{accent};color:white;font-size:7px;'
+                f'font-weight:700;padding:1px 4px;border-radius:3px;white-space:nowrap">'
+                f'{badge_text}</span></div>'
+                if show_badge else ""
+            )
             out += f'''
-              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;min-width:0">
-                {ic_svg}
+              <div style="display:flex;align-items:flex-start;gap:5px;margin-bottom:4px;min-width:0">
+                <div style="flex-shrink:0;margin-top:1px">{ic_svg}</div>
                 <div style="min-width:0;flex:1">
-                  <div style="font-size:11px;font-weight:700;color:{text};
-                               white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{name}</div>
-                  <div style="font-size:9px;font-family:monospace;color:{accent}">{stat}</div>
+                  <div style="font-size:10px;font-weight:700;color:{text};line-height:1.2;
+                              word-break:break-word">{name}</div>
+                  <div style="font-size:8px;font-family:monospace;color:{accent};margin-top:1px">{stat}</div>
+                  {detail_html}
                 </div>
                 {badge}
               </div>'''
@@ -2549,6 +2567,15 @@ def _generate_slide(slide: dict, style: dict,
     }
     accent = mood_to_accent.get(mood, style.get('blue', '#2471A3'))
 
+    _data_cap = (
+        int(getattr(config, "DESIGNER_RISK_MATRIX_DATA_JSON_MAX_CHARS", 12_000))
+        if is_rim
+        else int(getattr(config, "DESIGNER_SLIDE_DATA_JSON_MAX_CHARS", 2500))
+    )
+    _slide_json = json.dumps(slide.get('data', {}), indent=2, default=str)
+    if len(_slide_json) > _data_cap:
+        _slide_json = _slide_json[:_data_cap] + "\n... [truncated]"
+
     # Build the prompt
     prompt = DESIGNER_PROMPT.format(
         slot               = slot,
@@ -2561,9 +2588,7 @@ def _generate_slide(slide: dict, style: dict,
         color_mood         = mood,
         accent_color       = accent,
         design_seed        = seed,
-        slide_data         = json.dumps(
-                                 slide.get('data', {}), indent=2, default=str
-                             )[:2500],
+        slide_data         = _slide_json,
         feedback           = feedback or "None — produce your best first attempt.",
         bg                 = style.get('bg',     '#F5F0E8'),
         card               = style.get('card',   '#FFFFFF'),

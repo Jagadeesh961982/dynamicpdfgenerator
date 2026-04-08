@@ -1098,7 +1098,7 @@ Determine ALL of the following with maximum specificity:
    For data-rich input (logs/alerts/metrics): extract REAL values, timestamps, counts.
    For topic/educational input: generate REAL authoritative facts from your knowledge.
    BAD: "Many errors occurred"
-   GOOD: "1,847 critical alerts fired between 03:00-07:00 UTC, 73% from storage cluster"
+   GOOD: "1,847 critical alerts fired between 03:00-07:00 IST, 73% from storage cluster"
    BAD: "Kubernetes manages containers"
    GOOD: "Kubernetes orchestrates containers via 3 control plane components: API server, etcd, scheduler. etcd stores all cluster state as key-value pairs."
 
@@ -1215,16 +1215,16 @@ RULES — read carefully:
         "x_axis_label": "IMPACT",
         "y_axis_label": "EFFORT",
         "high_impact_low_effort": [
-          {{"name": "Issue/item name", "icon": "icon-name", "stat": "e.g. 847 errors/hr", "severity": "critical"}}
+          {{"name": "Issue/item name", "icon": "icon-name", "stat": "primary metric", "detail": "host/source/context (optional)", "severity": "critical"}}
         ],
         "high_impact_high_effort": [
-          {{"name": "Issue/item name", "icon": "icon-name", "stat": "e.g. 23% lag", "severity": "high"}}
+          {{"name": "Issue/item name", "icon": "icon-name", "stat": "primary metric", "detail": "optional context", "severity": "high"}}
         ],
         "low_impact_low_effort": [
-          {{"name": "Quick win item", "icon": "icon-name", "stat": "e.g. 12 alerts", "severity": "low"}}
+          {{"name": "Quick win item", "icon": "icon-name", "stat": "metric", "detail": "optional", "severity": "low"}}
         ],
         "low_impact_high_effort": [
-          {{"name": "Deprioritize item", "icon": "icon-name", "stat": "e.g. 4 issues", "severity": "medium"}}
+          {{"name": "Deprioritize item", "icon": "icon-name", "stat": "metric", "detail": "optional", "severity": "medium"}}
         ],
         "strategic_guidance": "2-3 sentence guidance on where to focus first and why",
         "immediate_action": "One concrete action required now (specific, not generic)",
@@ -1232,7 +1232,9 @@ RULES — read carefully:
         "last_sync": "timestamp or data freshness label"
       }}
     }}
-    Populate EVERY quadrant with real items from the analysis. Never leave a quadrant empty.
+    Populate EVERY quadrant with real items from the analysis — never empty.
+    When source data lists several distinct issues, put 2-4 items per quadrant (not just one).
+    Use "detail" for hostname, service, error class, or SLA impact so the matrix looks data-dense.
 
 Return ONLY valid JSON:
 {{
@@ -1331,22 +1333,40 @@ def _fallback_plan(analysis: dict) -> dict:
         low_f    = [f.get('fact', '') for f in facts if f.get('importance') == 'low']
         entities = analysis.get('key_entities', [])
 
-        def _fact_to_item(fact_str: str, idx: int, icon_name: str = 'alert-circle') -> dict:
-            parts = fact_str[:60].split(':')
-            name  = parts[0].strip()[:40] if len(parts) > 1 else fact_str[:35]
-            stat  = parts[1].strip()[:25] if len(parts) > 1 else ""
-            return {'name': name, 'icon': icon_name, 'stat': stat, 'severity': 'high'}
+        def _fact_to_item(
+            fact_str: str, idx: int, icon_name: str = 'alert-circle', severity: str = 'high',
+        ) -> dict:
+            s = (fact_str or '').strip()
+            if not s:
+                return {'name': 'Item', 'icon': icon_name, 'stat': '', 'detail': '', 'severity': severity}
+            parts = s.split(':', 1)
+            if len(parts) > 1:
+                name = parts[0].strip()[:52]
+                rest = parts[1].strip()
+            else:
+                name = s[:52]
+                rest = ''
+            stat = rest[:56].strip()
+            detail = rest[56:200].strip() if len(rest) > 56 else ""
+            return {
+                'name': name, 'icon': icon_name, 'stat': stat, 'detail': detail,
+                'severity': severity,
+            }
 
-        hi_lo_items = [_fact_to_item(f, i, 'zap')           for i, f in enumerate(critical[:2])]
-        hi_hi_items = [_fact_to_item(f, i, 'database')      for i, f in enumerate(critical[2:4])]
-        lo_lo_items = [_fact_to_item(f, i, 'settings')      for i, f in enumerate(low_f[:2])]
-        lo_hi_items = [_fact_to_item(f, i, 'git-branch')    for i, f in enumerate(medium[:2])]
+        hi_lo_items = [_fact_to_item(f, i, 'zap', 'critical') for i, f in enumerate(critical[:4])]
+        hi_hi_items = [_fact_to_item(f, i, 'database', 'high') for i, f in enumerate(critical[4:8])]
+        lo_lo_items = [_fact_to_item(f, i, 'settings', 'low') for i, f in enumerate(low_f[:4])]
+        lo_hi_items = [_fact_to_item(f, i, 'git-branch', 'medium') for i, f in enumerate(medium[:4])]
 
         # Ensure no empty quadrants
-        if not hi_lo_items: hi_lo_items = [{'name': 'Primary Alert', 'icon': 'alert-triangle', 'stat': 'See analysis', 'severity': 'critical'}]
-        if not hi_hi_items: hi_hi_items = [{'name': 'Complex Issue', 'icon': 'layers',          'stat': 'Needs planning', 'severity': 'high'}]
-        if not lo_lo_items: lo_lo_items = [{'name': 'Minor Items',   'icon': 'info',             'stat': 'Low priority', 'severity': 'low'}]
-        if not lo_hi_items: lo_hi_items = [{'name': 'Tech Debt',     'icon': 'clock',            'stat': 'Deferred', 'severity': 'medium'}]
+        if not hi_lo_items:
+            hi_lo_items = [{'name': 'Primary Alert', 'icon': 'alert-triangle', 'stat': 'See analysis', 'detail': '', 'severity': 'critical'}]
+        if not hi_hi_items:
+            hi_hi_items = [{'name': 'Complex Issue', 'icon': 'layers', 'stat': 'Needs planning', 'detail': '', 'severity': 'high'}]
+        if not lo_lo_items:
+            lo_lo_items = [{'name': 'Minor Items', 'icon': 'info', 'stat': 'Low priority', 'detail': '', 'severity': 'low'}]
+        if not lo_hi_items:
+            lo_hi_items = [{'name': 'Tech Debt', 'icon': 'clock', 'stat': 'Deferred', 'detail': '', 'severity': 'medium'}]
 
         slides.append({
             'slot': len(slides) + 1,
@@ -1471,7 +1491,7 @@ def run(raw_data: str) -> dict:
                 chunk_count=len(chunks),
             ),
             key="analyzer",
-            max_tokens=4000,
+            max_tokens=8000,
         )
     except Exception as e:
         print(f"  [Analyzer] Failed: {e} — using minimal analysis")

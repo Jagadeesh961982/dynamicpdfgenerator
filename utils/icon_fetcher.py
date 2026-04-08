@@ -238,9 +238,7 @@ def fetch_and_register(names: list[str], timeout: int = 8) -> dict[str, bool]:
 
         if not svg_text:
             print(f"  [IconFetcher] ✗ '{name}' not found")
-            cache[name_lower] = {"slug": slug, "paths": None}
             results[name] = False
-            updated = True
             continue
 
         # Try to find viewBox
@@ -250,9 +248,7 @@ def fetch_and_register(names: list[str], timeout: int = 8) -> dict[str, bool]:
         paths = _extract_path_from_svg(svg_text)
         if not paths:
             print(f"  [IconFetcher] ✗ '{name}' — SVG parse failed")
-            cache[name_lower] = {"slug": slug, "paths": None}
             results[name] = False
-            updated = True
             continue
 
         # Determine color
