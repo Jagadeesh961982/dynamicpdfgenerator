@@ -17,6 +17,7 @@
 #   python orchestrator.py --input logs.txt --iterations 5 --threshold 8.0
 
 import argparse, json, os, sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -108,15 +109,14 @@ def load(path: str) -> str:
 #  PDF EXPORT
 # ══════════════════════════════════════════════════════════════════
 
-def export_pdf(html_path: str, pdf_path: str) -> bool:
-    abs_html = str(Path(html_path).resolve())
+def _playwright_html_to_pdf(abs_html: str, pdf_path: str) -> None:
+    """Sync Playwright run — must execute in a worker thread under Uvicorn/asyncio."""
+    from playwright.sync_api import sync_playwright
 
-    # 1. Playwright (best — waits for Chart.js renders)
-    try:
-        from playwright.sync_api import sync_playwright
-        log("   Converting via [cyan]Playwright[/cyan]...")
-        with sync_playwright() as pw:
-            br = pw.chromium.launch()
+    log("   Converting via [cyan]Playwright[/cyan]...")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        try:
             pg = br.new_page(viewport={"width": 1280, "height": 720})
             pg.goto(f"file:///{abs_html}", wait_until="networkidle")
 
@@ -134,7 +134,6 @@ def export_pdf(html_path: str, pdf_path: str) -> bool:
             else:
                 pg.wait_for_timeout(1500)
 
-            # Extra settle time for layout/font paint
             pg.wait_for_timeout(500)
 
             pg.pdf(
@@ -144,7 +143,23 @@ def export_pdf(html_path: str, pdf_path: str) -> bool:
                 print_background=True,
                 margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
             )
+        finally:
             br.close()
+
+
+def export_pdf(html_path: str, pdf_path: str) -> bool:
+    abs_html = str(Path(html_path).resolve())
+
+    # 1. Playwright (best — waits for Chart.js renders)
+    # Run sync API in a dedicated thread: Uvicorn runs handlers on asyncio; Playwright
+    # sync API must not run on the event-loop thread ("Sync API inside the asyncio loop").
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("playwright") is None:
+            raise ImportError("playwright not installed")
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright_pdf") as pool:
+            pool.submit(_playwright_html_to_pdf, abs_html, pdf_path).result(timeout=600)
         log(f"   [green]✅ PDF: {pdf_path}[/green]")
         return True
     except ImportError:

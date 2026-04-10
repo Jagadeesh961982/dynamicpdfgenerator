@@ -36,6 +36,13 @@ class Settings(BaseSettings):
         default=60 * 24 * 7,
         alias="ACCESS_TOKEN_EXPIRE_MINUTES",
     )
+    cors_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        alias="CORS_ORIGINS",
+    )
+
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     def database_url_resolved(self) -> str:
         if self.database_url:

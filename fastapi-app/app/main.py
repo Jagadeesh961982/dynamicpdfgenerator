@@ -10,6 +10,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 
 from app.api.api_v1.api import router as api_v1_router
 from app.core.config import get_settings
@@ -30,6 +31,18 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+_settings = get_settings()
+_origins = _settings.cors_origins_list()
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.include_router(api_v1_router)
 
 
