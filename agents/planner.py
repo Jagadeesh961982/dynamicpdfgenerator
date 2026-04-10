@@ -1201,11 +1201,25 @@ RULES — read carefully:
    BAD: "System Overview" | GOOD: "Why Three Services Went Dark at 3AM"
 4. The "data" field must contain ALL values the designer needs to render the slide.
    Include real numbers, real names, real labels — never say "see analysis".
+   ★ CONTENT DENSITY: Each slide's "data" MUST be RICH and DETAILED:
+   - For card/grid slides (stat_cards_row, info_cards_grid): provide 4-6 items, each with
+     "title", "value"/"stat", "description" (2-3 full sentences explaining the item), and "icon".
+   - For bullet slides (two_column_bullets, priority_table): provide 4-6 bullet items, each with
+     "title", "description" (2-3 informative sentences — NOT a one-word label), and "metric".
+   - For chart slides: include data arrays AND 3-4 key_takeaways (each a full sentence).
+   - For timeline slides: include 4-6 events each with "date", "title", "description" (2 sentences).
+   - BAD data: {{"facts": ["High CPU"]}}
+   - GOOD data: {{"items": [{{"title": "CPU Saturation on SIDCSAPHRIAPP", "value": "94.3%",
+     "description": "Application server CPU peaked at 94.3% sustained for 47 minutes between
+     03:12-03:59 IST, triggering thread pool exhaustion and 1,847 queued requests. This correlates
+     with the Kafka consumer lag spike on the same host.", "icon": "cpu"}}]}}
+   The designer renders EXACTLY what you put in data — thin data = empty-looking slides.
 5. story_angle must explain WHY this slide matters to the audience.
 6. For "icon" fields in data: use ONLY names from the AVAILABLE ICON NAMES list above.
 7. Each slide needs a unique visual_type — minimize repeats.
 8. "visual_description" must be detailed enough for a designer to render from scratch.
 9. If data_richness is "low", use your knowledge to create REAL data values in the data field.
+   Populate EACH slide with 4-6 content items that have full multi-sentence descriptions.
 10. ★ MANDATORY for content_type=alerts/logs/incidents/performance_metrics:
     MUST include exactly ONE slide with visual_type="risk_impact_matrix".
     Use this EXACT data schema for that slide:
@@ -1312,17 +1326,28 @@ def _fallback_plan(analysis: dict) -> dict:
         tf = [f for f in facts if f.get('category', '').lower() == theme.lower()]
         if not tf:
             tf = facts[max(0, i-2):min(i+1, len(facts))]
+        items = []
+        for j, f in enumerate(tf[:6]):
+            fact_text = f.get('fact', '') if isinstance(f, dict) else str(f)
+            items.append({
+                'title': fact_text.split('.')[0].strip() or f'Finding {j+1}',
+                'value': f.get('stat', f.get('metric', '')) if isinstance(f, dict) else '',
+                'description': fact_text,
+                'icon': 'info' if j % 2 == 0 else 'bar-chart-2',
+            })
+        if not items:
+            items = [{'title': f'{theme} insight', 'value': '', 'description': f'Key insights about {theme}.', 'icon': 'info'}]
         slides.append({
             'slot': i,
             'title': theme,
-            'subtitle': '',
-            'story_angle': f'Analysis of {theme}',
+            'subtitle': f'Deep dive into {theme}',
+            'story_angle': f'Analysis of {theme} — why it matters and what the data shows',
             'key_insight': tf[0].get('fact', f'Key insights about {theme}') if tf else f'Key insights about {theme}',
             'visual_type': vt_cycle[(i - 2) % len(vt_cycle)],
-            'visual_description': f'Visual showing key aspects of {theme} with real data.',
+            'visual_description': f'Visual showing key aspects of {theme} with detailed data items.',
             'layout_hint': 'left_text_right_visual',
             'color_mood': cm_cycle[(i - 2) % len(cm_cycle)],
-            'data': {'theme': theme, 'facts': [f.get('fact', '') for f in tf[:5]]},
+            'data': {'theme': theme, 'items': items},
         })
 
     # Add risk_impact_matrix for operational content (guaranteed via Python renderer)

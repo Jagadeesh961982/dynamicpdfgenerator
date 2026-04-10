@@ -123,7 +123,7 @@ PLANNER_RAW_SAMPLE_STORE_CHARS = 4000  # plan['_raw_sample'] for downstream
 PLANNER_ANALYSIS_JSON_MAX_CHARS = 8000  # analysis JSON in planner prompt
 
 # Designer: JSON snippet of slide["data"] injected into DESIGNER_PROMPT (agents/designer.py)
-DESIGNER_SLIDE_DATA_JSON_MAX_CHARS = 2500
+DESIGNER_SLIDE_DATA_JSON_MAX_CHARS = 6000
 # risk_impact_matrix payloads are large; use a higher cap so the LLM sees all quadrant items.
 DESIGNER_RISK_MATRIX_DATA_JSON_MAX_CHARS = 12_000
 # Python risk matrix renderer: max items shown per quadrant (designer.py)

@@ -19,3 +19,17 @@ playwright>=1.40.0
 
 # Option B — pdfkit (needs wkhtmltopdf binary installed separately)
 # pdfkit>=1.0.0
+
+# ── HTTP API (optional) — run from fastapi-app/: uvicorn app.main:app ──
+fastapi>=0.110.0                     # ASGI routes
+uvicorn[standard]>=0.27.0            # production server
+python-multipart>=0.0.9             # file uploads
+pydantic[email]>=2.0.0              # EmailStr
+pydantic-settings>=2.0.0
+email-validator>=2.0.0
+sqlalchemy>=2.0.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+cryptography>=42.0.0
+pytest>=8.0.0                        # fastapi-app/app/tests
+httpx>=0.27.0                         # TestClient

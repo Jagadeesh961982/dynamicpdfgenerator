@@ -1898,6 +1898,21 @@ SAFE VERTICAL STACKING PATTERN:
 • NO JSON or dict text visible on any slide
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ CONTENT DENSITY — CRITICAL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Slides MUST be information-rich, NOT just decorative boxes.
+- Every card, row, or bullet MUST include a DESCRIPTION of 2-3 FULL SENTENCES rendered as
+  visible <p> or <span> text. One-word labels or single-stat cards are NOT acceptable.
+- Render ALL items from SLIDE DATA — do NOT skip or summarize. If data has 5 items, show 5 items.
+- Each item should show: icon + bold title + metric/stat + multi-sentence description paragraph.
+- Use text-xs leading-relaxed for descriptions so they fit without overflow.
+- NEVER leave a card with just a title and number — always add a description line.
+- Body text should convey insight, not just label the metric. Example:
+  BAD:  "CPU: 94%"
+  GOOD: "CPU: 94% — Application server sustained 94% utilisation for 47 minutes,
+        triggering thread pool exhaustion and 1,847 queued requests."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   VISUAL TYPE GUIDE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1930,10 +1945,13 @@ stat_cards_row:
   Title row with [[icon:NAME:32:COLOR]] right side.
   4-card grid: each card has [[icon:NAME:40:COLOR]] top-right, big number text-4xl,
   label, sub-label, colored top border (border-t-4).
+  ★ BELOW each number: a text-xs description paragraph (2-3 sentences) explaining what
+  the metric means and why it matters. Cards must NOT be just a number and label.
 
 bar_chart_annotated:
-  Left 40%: headline + 3 key bullets each with [[icon:NAME:20:COLOR]] + text + metric badge.
-  Right 60%: Chart.js bar chart. Below: 2 insight callout boxes (border-l-4).
+  Left 40%: headline + 3-4 key bullets each with [[icon:NAME:20:COLOR]] + bold title +
+  metric badge + text-xs description sentence explaining the bullet.
+  Right 60%: Chart.js bar chart. Below: 2 insight callout boxes (border-l-4) with full-sentence text.
 
 area_chart_gradient:
   Title + 3 stat pills top. Full-width Chart.js area/line with gradient fill.
@@ -2113,15 +2131,18 @@ funnel_diagram:
 
 info_cards_grid:
   Title. 2×2 or 3×2 card grid. Each: [[icon:NAME:32:COLOR]] top-left,
-  title font-semibold, 2-3 line desc. Alternating left-border accent colors.
+  title font-semibold, 2-3 sentence description paragraph (text-xs leading-relaxed).
+  Alternating left-border accent colors.
+  ★ Each card MUST include a multi-sentence description — not just a title.
 
 concept_diagram:
   3-6 step horizontal flow. Each step: circle/box + [[icon:NAME:32:COLOR]] + number,
-  bold title, 2-line desc. Arrows between steps (CSS or → character styled).
+  bold title, 2-sentence description. Arrows between steps (CSS or → character styled).
 
 two_column_bullets:
-  Left 40%: large [[icon:NAME:64:COLOR]], title, key insight paragraph, metric badge.
-  Right 60%: 4-6 bullet items each with [[icon:NAME:20:COLOR]] + bold label + text.
+  Left 40%: large [[icon:NAME:64:COLOR]], title, key insight paragraph (2-3 sentences), metric badge.
+  Right 60%: 4-6 bullet items each with [[icon:NAME:20:COLOR]] + bold label +
+  text-xs description sentence (NOT just a label — explain what it means).
 
 callout_hero:
   Large pull-quote center (text-3xl font-italic). Attribution below.
@@ -2131,7 +2152,9 @@ callout_hero:
 
 Start with exactly: <div class="h-full w-full flex flex-col overflow-hidden" style="background:{bg}; max-height:720px;">
 Generate complete, specific HTML now. Use [[icon:NAME:SIZE:COLOR]] for ALL icons.
-Remember: flex-1 min-h-0 on main content, flex-shrink-0 on header/footer."""
+Remember: flex-1 min-h-0 on main content, flex-shrink-0 on header/footer.
+★ CONTENT DENSITY CHECK: Every card/bullet MUST have a multi-sentence description rendered
+  as visible text. Slides with only titles and numbers will be rejected."""
 
 
 # ══════════════════════════════════════════════════════════════════

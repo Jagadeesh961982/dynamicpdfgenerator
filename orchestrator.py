@@ -38,6 +38,14 @@ import config
 sys.path.insert(0, str(Path(__file__).parent))
 
 
+class PipelineInputError(RuntimeError):
+    """Invalid or missing input (API-safe; CLI maps to exit code 1)."""
+
+
+class PipelinePlanError(RuntimeError):
+    """Planner produced no slides."""
+
+
 # ══════════════════════════════════════════════════════════════════
 #  INPUT LOADER
 # ══════════════════════════════════════════════════════════════════
@@ -46,7 +54,7 @@ def load(path: str) -> str:
     p = Path(path)
     if not p.exists():
         log(f"[red]File not found: {path}[/red]")
-        sys.exit(1)
+        raise PipelineInputError(f"File not found: {path}")
 
     ext = p.suffix.lower()
     log(f"📂 Loading [cyan]{ext}[/cyan] — {p.name}")
@@ -72,7 +80,9 @@ def load(path: str) -> str:
             return text[:config.MAX_DATA_CHARS]
         except ImportError:
             log("   [red]No PDF library. Install: pip install pdfplumber[/red]")
-            sys.exit(1)
+            raise PipelineInputError(
+                "No PDF library. Install: pip install pdfplumber (or PyPDF2)"
+            ) from None
 
     # CSV
     if ext == '.csv':
@@ -201,7 +211,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
 
     if not plan.get('slides'):
         log("[red]Planner returned no slides — aborting[/red]")
-        sys.exit(1)
+        raise PipelinePlanError("Planner returned no slides")
 
     # Save plan
     plan_path = str(out_dir / f"{stem}_plan.json")
@@ -346,7 +356,11 @@ def main():
     if args.seed is not None:
         config.DESIGN_SEED = args.seed
 
-    run(args.input, args.output, html_only=args.html_only)
+    try:
+        run(args.input, args.output, html_only=args.html_only)
+    except (PipelineInputError, PipelinePlanError) as e:
+        log(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

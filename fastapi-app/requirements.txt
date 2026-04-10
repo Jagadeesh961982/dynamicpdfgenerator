@@ -1,0 +1,5 @@
+# Install from repository root for a full environment:
+#   pip install -r requirements.txt
+# Or from this directory (pulls pipeline deps + FastAPI stack):
+-r ../requirements.txt
+pydantic-settings>=2.0.0
