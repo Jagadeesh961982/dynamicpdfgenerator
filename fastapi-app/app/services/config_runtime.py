@@ -27,6 +27,8 @@ _CONFIG_KEYS: tuple[str, ...] = (
     "VISUAL_STYLE",
     "DESIGN_SEED",
     "MAX_DATA_CHARS",
+    "BROWSER_ENABLED",
+    "BROWSER_MAX_PAGES",
 )
 
 

@@ -1,0 +1,42 @@
+Assessing Quantum Challenges
+Risk and Impact Analysis
+
+Quantum computing is rapidly advancing beyond theoretical frameworks into practical implementations that pose real risks to current cryptographic infrastructure. This report assesses the key quantum challenges organizations must prepare for and evaluates their risk and impact across critical systems.
+
+Key Quantum Threats:
+
+1. Cryptographic Vulnerability (Harvest Now, Decrypt Later)
+Adversaries are actively harvesting encrypted data today with the intention of decrypting it once sufficiently powerful quantum computers are available. RSA-2048 and ECC-256 — the backbone of TLS, PKI, and code signing — are vulnerable to Shor's algorithm. Timelines estimate cryptographically relevant quantum computers (CRQCs) arriving within 8–15 years.
+
+2. Symmetric Key Weakening via Grover's Algorithm
+Grover's algorithm effectively halves symmetric key security (e.g., AES-128 drops to 64-bit effective security). Organizations relying on AES-128 or shorter keys need migration plans. AES-256 remains quantum-resistant with sufficient margin.
+
+3. Post-Quantum Cryptography (PQC) Transition Risk
+NIST finalized its first PQC standards in 2024: ML-KEM (CRYSTALS-Kyber), ML-DSA (CRYSTALS-Dilithium), and SLH-DSA (SPHINCS+). Transitioning enterprise systems — PKI, VPNs, TLS stacks, firmware signing, HSMs — is complex, multi-year, and carries significant implementation risk. FIPS 203, 204, 205 are the governing standards.
+
+4. Quantum Key Distribution (QKD) Deployment Challenges
+While QKD offers information-theoretic security, practical deployment faces channel distance limits (~600 km without trusted nodes), high cost, and lack of scalable infrastructure. Satellite-based QKD (e.g., China's Micius satellite) demonstrates feasibility but is not commercially viable at scale.
+
+5. Quantum Sensing and Side-Channel Risks
+Quantum-enhanced sensors (atomic clocks, magnetometers, gravimeters) can potentially extract cryptographic material and defeat shielding previously considered adequate. This is an emerging but credible long-term risk.
+
+Impact Assessment by Sector:
+
+Financial Services: HIGH — payment rails, interbank settlement, customer data at extreme risk. SWIFT, ACH networks run on classical crypto. Migration cost estimated $2–5B industry-wide.
+
+Healthcare: HIGH — patient records, genomic data, FDA submissions protected by RSA/ECC. HIPAA compliance frameworks do not yet address quantum threats.
+
+Defense & Government: CRITICAL — classified communications, nuclear C2 systems, intelligence collection must achieve PQC migration by NSA CNSA 2.0 mandate deadlines (2030 for new systems, 2035 for legacy).
+
+Critical Infrastructure: HIGH — SCADA/ICS systems have long lifecycles (15–25 years), meaning hardware deployed today may still be in service when CRQCs arrive. Power grids, water treatment, transportation systems at risk.
+
+Cloud & SaaS: MEDIUM-HIGH — major providers (AWS, Azure, GCP) are testing PQC in TLS handshakes. Full stack migration timelines 2026–2030.
+
+Recommended Actions:
+
+- Conduct cryptographic inventory across all systems and dependencies
+- Classify data by sensitivity and retention period (data with >10-year sensitivity is harvest-now risk)
+- Begin PQC pilots using NIST FIPS 203/204/205 algorithms
+- Engage HSM vendors on PQC roadmaps (Thales, Utimaco, Entrust)
+- Monitor CISA, NSA CNSA 2.0, and ETSI QSC standards for compliance requirements
+- Budget for 3–5 year migration program with phased rollout

@@ -147,6 +147,74 @@ def _playwright_html_to_pdf(abs_html: str, pdf_path: str) -> None:
             br.close()
 
 
+def _playwright_html_to_pptx(abs_html: str, pptx_path: str) -> None:
+    """Screenshot each slide via Playwright, build PPTX with python-pptx."""
+    from playwright.sync_api import sync_playwright
+    from pptx import Presentation
+    from pptx.util import Emu
+    import io
+
+    SLIDE_W, SLIDE_H = 1280, 720
+    log("   Screenshotting slides via [cyan]Playwright[/cyan]...")
+    with sync_playwright() as pw:
+        br = pw.chromium.launch()
+        try:
+            # device_scale_factor=1 ensures screenshots are exactly SLIDE_W×SLIDE_H
+            # pixels regardless of the host display's DPI.
+            ctx = br.new_context(
+                viewport={"width": SLIDE_W, "height": SLIDE_H},
+                device_scale_factor=1.0,
+            )
+            pg = ctx.new_page()
+            pg.goto(f"file:///{abs_html}", wait_until="networkidle")
+            chart_total = pg.evaluate(
+                "parseInt(document.querySelector('meta[name=chart-total]')?.content || '0')"
+            )
+            if chart_total > 0:
+                log(f"   Waiting for {chart_total} Chart.js charts...")
+                try:
+                    pg.wait_for_function(
+                        f"window.__chartsReady >= {chart_total}", timeout=10000
+                    )
+                except Exception:
+                    log("   [yellow]Chart wait timed out — capturing anyway[/yellow]")
+            else:
+                pg.wait_for_timeout(1500)
+            pg.wait_for_timeout(500)
+            slide_els = pg.query_selector_all("section.slide")
+            screenshots = [el.screenshot() for el in slide_els]
+        finally:
+            br.close()
+
+    prs = Presentation()
+    prs.slide_width  = Emu(12192000)  # 13.333" at 96 dpi = 1280 px
+    prs.slide_height = Emu(6858000)   # 7.5"   at 96 dpi = 720 px
+    blank_layout = prs.slide_layouts[6]
+    for png_bytes in screenshots:
+        sl = prs.slides.add_slide(blank_layout)
+        sl.shapes.add_picture(io.BytesIO(png_bytes), 0, 0, prs.slide_width, prs.slide_height)
+    prs.save(pptx_path)
+
+
+def export_pptx(html_path: str, pptx_path: str) -> bool:
+    abs_html = str(Path(html_path).resolve())
+    try:
+        import importlib.util
+        if importlib.util.find_spec("playwright") is None:
+            raise ImportError("playwright not installed")
+        if importlib.util.find_spec("pptx") is None:
+            raise ImportError("python-pptx not installed")
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright_pptx") as pool:
+            pool.submit(_playwright_html_to_pptx, abs_html, pptx_path).result(timeout=600)
+        log(f"   [green]✅ PPTX: {pptx_path}[/green]")
+        return True
+    except ImportError as e:
+        log(f"   [yellow]PPTX export unavailable: {e}[/yellow]")
+    except Exception as e:
+        log(f"   [yellow]PPTX export failed: {e}[/yellow]")
+    return False
+
+
 def export_pdf(html_path: str, pdf_path: str) -> bool:
     abs_html = str(Path(html_path).resolve())
 
@@ -196,10 +264,57 @@ def export_pdf(html_path: str, pdf_path: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  PPTX THEME UNIFICATION
+# ══════════════════════════════════════════════════════════════════
+
+# Higher priority = preferred for a cohesive professional presentation
+_PPTX_PERSONA_PRIORITY: dict[str, int] = {
+    "editorial_dark":    8,
+    "technical_dense":   7,
+    "data_dashboard":    6,
+    "minimalist_focus":  5,
+    "narrative_warm":    4,
+    "magazine_spread":   3,
+    "vibrant_split":     2,
+    "infographic_vibrant": 1,
+}
+
+
+def _unify_pptx_personas(plan: dict) -> None:
+    """Collapse per-slide aesthetic_persona to one consistent theme for PPTX.
+
+    PDF variety (8 personas) looks intentional; PPTX slide-flipping makes
+    background jumps look broken.  Pick the single most-professional persona
+    from those already assigned by the planner and stamp it on every slide.
+    """
+    slides = plan.get("slides", [])
+    if not slides:
+        return
+    from collections import Counter
+    counts: Counter = Counter(
+        s.get("aesthetic_persona") for s in slides if s.get("aesthetic_persona")
+    )
+    if not counts:
+        return
+    # Sort by (frequency desc, priority desc) so we get the most-used
+    # professional persona in case of a tie.
+    theme = max(
+        counts,
+        key=lambda p: (counts[p], _PPTX_PERSONA_PRIORITY.get(p, 0)),
+    )
+    log(
+        f"  [PPTX] Unifying theme → [cyan]{theme}[/cyan] "
+        f"(was {len(counts)} different personas across {len(slides)} slides)"
+    )
+    for slide in slides:
+        slide["aesthetic_persona"] = theme
+
+
+# ══════════════════════════════════════════════════════════════════
 #  MAIN PIPELINE
 # ══════════════════════════════════════════════════════════════════
 
-def run(input_path: str, output_path: str, html_only: bool = False):
+def run(input_path: str, output_path: str, html_only: bool = False, output_format: str = "pdf"):
     out_dir = Path(output_path).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(output_path).stem
@@ -218,15 +333,29 @@ def run(input_path: str, output_path: str, html_only: bool = False):
     from agents.designer  import run as design_slides
     from agents.assembler import run as assemble_html
     from agents.critic    import run as critique
+    from agents.browser   import run as browser_enrich
+
+    # ── AGENT 0.5: Browser / Web Research (optional) ──────────────
+    raw_data = load(input_path)
+    if config.BROWSER_ENABLED:
+        rule("Agent 0.5 — Browser / Web Research")
+        raw_data = browser_enrich(raw_data)
+    else:
+        log("  [Browser] Disabled — set BROWSER_ENABLED=true in .env to enable web research")
 
     # ── AGENTS 0+1: Analyzer + Planner ────────────────────────────
     rule("Agent 0+1 — Analyzer + Planner")
-    raw_data = load(input_path)
-    plan     = plan_slides(raw_data)
+    plan = plan_slides(raw_data)
 
     if not plan.get('slides'):
         log("[red]Planner returned no slides — aborting[/red]")
         raise PipelinePlanError("Planner returned no slides")
+
+    # For PPTX: collapse all persona variety to one cohesive theme.
+    # PDF benefits from variety; PPTX slide-flipping makes background
+    # jumps look broken.
+    if output_format == "pptx":
+        _unify_pptx_personas(plan)
 
     # Save plan
     plan_path = str(out_dir / f"{stem}_plan.json")
@@ -267,6 +396,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
             plan           = plan,
             feedback       = feedback,
             slides_to_redo = slides_to_redo,
+            output_format  = output_format,
         )
 
         # ── Agent 3: Assembler ─────────────────────────────────────
@@ -285,7 +415,7 @@ def run(input_path: str, output_path: str, html_only: bool = False):
         log(f"  💾 [dim]{iter_html}[/dim]")
 
         # ── Agent 4: Critic ────────────────────────────────────────
-        result = critique(html, plan)
+        result = critique(html, plan, output_format=output_format)
         history.append(result.to_dict())
 
         if result.weighted_score > best_score:
@@ -319,8 +449,11 @@ def run(input_path: str, output_path: str, html_only: bool = False):
         f.write(best_html)
     log(f"  ✅ HTML: [green]{final_html}[/green]")
 
-    if not html_only and output_path.endswith('.pdf'):
-        export_pdf(final_html, output_path)
+    if not html_only:
+        if output_format == "pptx":
+            export_pptx(final_html, output_path)
+        elif output_path.endswith('.pdf'):
+            export_pdf(final_html, output_path)
 
     # ── Summary ────────────────────────────────────────────────────
     rule("📊  Summary")

@@ -1697,6 +1697,52 @@ def _shift_color(hex_color: str, delta: int) -> str:
 #  from being clipped by the canvas boundary (causes numbers cut off at bottom)
 # ══════════════════════════════════════════════════════════════════
 
+def _fix_overflow(html_text: str) -> str:
+    """
+    Post-process LLM-generated slide HTML to catch common overflow mistakes.
+    A 720px-tall slide has very little vertical budget; enforce hard caps.
+    """
+    # 1. Clamp oversized padding Tailwind classes
+    html_text = re.sub(r'\bpy-1[2-9]\b', 'py-8', html_text)
+    html_text = re.sub(r'\bp-1[2-9]\b',  'p-8',  html_text)
+    html_text = re.sub(r'\bpb-1[2-9]\b', 'pb-8', html_text)
+    html_text = re.sub(r'\bpt-1[2-9]\b', 'pt-8', html_text)
+
+    # 2. Cap inline font-size in REM — hero numbers allowed up to 5rem (~80px)
+    def _cap_rem(m: re.Match) -> str:
+        try:
+            if float(m.group(1)) > 5:
+                return 'font-size:5rem'
+        except ValueError:
+            pass
+        return m.group(0)
+    html_text = re.sub(r'font-size:([\d.]+)rem', _cap_rem, html_text)
+
+    # 3. Cap inline font-size in PX — hero numbers allowed up to 96px
+    def _cap_px(m: re.Match) -> str:
+        try:
+            if int(m.group(1)) > 96:
+                return 'font-size:96px'
+        except ValueError:
+            pass
+        return m.group(0)
+    html_text = re.sub(r'font-size:(\d+)px', _cap_px, html_text)
+
+    # 4. Downgrade oversized Tailwind text-size classes
+    for oversized, capped in [
+        ('text-9xl', 'text-5xl'),
+        ('text-8xl', 'text-5xl'),
+        ('text-7xl', 'text-4xl'),
+        ('text-6xl', 'text-4xl'),
+    ]:
+        html_text = html_text.replace(oversized, capped)
+
+    # 5. Remove explicit min-h-[Npx] from card/grid children — cards fill flexibly
+    html_text = re.sub(r'\bmin-h-\[\d+px\]', '', html_text)
+
+    return html_text
+
+
 def _fix_chartjs_padding(html_text: str) -> str:
     """
     Inject layout.padding into Chart.js options if not already present.
@@ -1762,27 +1808,51 @@ Output ONLY raw HTML. No JSON. No markdown. No ```html. No \\n escapes.
 Start directly with: <div class="h-full w-full" ...>
 End with closing </div> and any <script> tags.
 
-You are an expert Frontend Developer building one 1280×720px slide for a NotebookLM-quality PDF.
+You are a world-class Creative Director + Frontend Engineer building one 1280×720px slide.
+Every slide you produce must look like it belongs in a DIFFERENT visual world from the others.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   SLIDE SPEC
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Slot:           {slot}
-  Title:          {title}
-  Subtitle:       {subtitle}
-  Story angle:    {story_angle}
-  Key insight:    {key_insight}
-  Visual type:    {visual_type}
-  Visual desc:    {visual_description}
-  Color mood:     {color_mood}
-  Accent:         {accent_color}
-  Design seed:    {design_seed}
+  Slot:              {slot}
+  Title:             {title}
+  Subtitle:          {subtitle}
+  Story angle:       {story_angle}
+  Key insight:       {key_insight}
+  Visual type:       {visual_type}  ← content structure hint (see STEP 1)
+  Visual desc:       {visual_description}
+  Color mood:        {color_mood}
+  Accent:            {accent_color}
+  Design seed:       {design_seed}
+  Aesthetic persona: {aesthetic_persona}  ← visual treatment mandate (see STEP 2)
 
 SLIDE DATA (use EXACT values — never substitute):
 {slide_data}
 
 PREVIOUS CRITIC FEEDBACK (fix these):
 {feedback}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ STEP 1 — ANALYZE THE DATA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Inspect SLIDE DATA and determine:
+
+  A) ITEM COUNT — match your component count exactly to the data.
+     2 items → 2-col. 3 items → 3-col. 4-6 → grid. 7+ → table/list.
+     NEVER pad with fake items. NEVER cut real items to fit a template.
+
+  B) DATA TYPE → best content structure:
+     Numeric metrics         → stat cards, big number, bar chart
+     Time-series / trends    → area chart, timeline
+     Comparisons (A vs B)    → comparison panel, bar chart
+     Ranked / prioritized    → priority table, scatter quadrant
+     Sequential steps        → concept diagram, domino chain, funnel
+     Single dominant stat    → big_number_hero
+     Striking finding/quote  → callout_hero
+     Descriptive text-heavy  → two_column_bullets, info_cards_grid
+     Risk / severity         → risk_impact_matrix
+
+  C) If visual_type hint fits the data → use it. If NOT → override with the best fit from (B).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   PALETTE (use these exact hex values via Tailwind arbitrary syntax)
@@ -1875,6 +1945,11 @@ RULES TO PREVENT OVERFLOW:
   5. Cover slides: preview cards at bottom must use fixed h-[140px] max and pb-6 (not pb-12)
   6. If a visual type has title + 4 cards + insight box: reduce card padding to p-3
   7. NEVER use py-12 or p-12 inside the slide — maximum outer padding is p-10
+  8. ALL flex containers: add min-w-0 to every child that contains text
+  9. ALL text containers: add overflow:hidden so text clips at boundary rather than pushing layout
+  10. Font size caps: slide titles max text-4xl (2.25rem). Body text max text-sm. Hero numbers max text-[140px].
+  11. Description paragraphs: ALWAYS text-xs leading-relaxed — NEVER text-base or text-lg for body copy
+  12. Card heights inside grids: NEVER use min-h — let flex column fill naturally
 
 SAFE VERTICAL STACKING PATTERN:
   <div class="h-full w-full flex flex-col overflow-hidden" style="background:{bg}">
@@ -1887,15 +1962,133 @@ SAFE VERTICAL STACKING PATTERN:
   </div>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  NOTEBOOKLM VISUAL STYLE
+  ★ STEP 2 — APPLY YOUR AESTHETIC PERSONA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Cards: rounded-xl shadow-md, p-5–p-8, border-l-4 accent
-• Hero stat: text-8xl font-black in accent color as focal point
-• Backgrounds: subtle pattern or gradient OK (CSS only, no img URLs)
-• Design seed {design_seed}: >6000=bold/asymmetric, <3000=refined/symmetric
-• NO raw markdown (**bold** → use <strong>)
-• NO placeholder text — all content from slide data
-• NO JSON or dict text visible on any slide
+Your aesthetic_persona is: {aesthetic_persona}
+
+This is a STRICT visual mandate — not a suggestion. It controls background, typography,
+card style, layout structure, and footer. Treat it as a client design brief you CANNOT deviate from.
+The visual_type (Step 1) defines WHAT content to show; the aesthetic defines HOW it looks.
+
+⛔ BANNED for all personas: same light-blue #EFF6FF bg on every slide, generic 3-zone
+   (header/content/footer) as the only layout option, white cards with left-border accent everywhere.
+⛔ BANNED: pure black (#000000, #0D0D0D) as slide background — use dark NAVY (#0F1629, #0A1020, #131926).
+⛔ BANNED: mixing dark persona with white cards — if bg is dark navy, cards MUST be dark too.
+⛔ BANNED: inline font-size above 3.5rem (56px) for titles — use text-4xl or text-5xl max for headings.
+⛔ BANNED: font-size above 96px for ANY element, including hero numbers — the slide is only 720px tall.
+
+────────────────────────────────────────────────
+PERSONA: editorial_dark
+  Bg: #0F1629 (dark navy — NOT pure black). Card bg: #1A2235. Border: #2A3352. Text: #E8EDF5. Muted: #7A8BA8.
+  Headlines: font-['Playfair_Display'] font-black — use style="font-family:'Playfair Display',serif"
+             Playfair italic for sub-headlines: style="font-family:'Playfair Display',serif;font-style:italic"
+  Body: Inter. All numbers + labels: font-mono.
+  Layout: ASYMMETRIC. Not centered grid. Example: left 58% = large Playfair headline block +
+          supporting text, right 42% = vertical panel of monospace stat rows separated by thin lines.
+          OR: Top 35% = full-width dark headline band. Bottom 65% = 2-col dark cards.
+  Cards: bg-[#1A2235] border border-[#2A3352] rounded-lg NO white NO shadow-md
+  Accents: ONLY on text/borders/numbers — {accent_color} as highlight, not background fill
+  Footer: NONE. Instead bottom-left: one line font-mono text-[9px] text-[#7A8BA8] opacity-40.
+  DO NOT use any light (#EFF6FF, white, #F8FAFC) as slide background.
+
+────────────────────────────────────────────────
+PERSONA: data_dashboard
+  Bg: #0A1020 (dark navy) with subtle grid: style="background:#0A1020;
+      background-image:repeating-linear-gradient(rgba(255,255,255,0.025) 1px,transparent 1px),
+      repeating-linear-gradient(90deg,rgba(255,255,255,0.025) 1px,transparent 1px);
+      background-size:40px 40px"
+  Text: #CBD5E1. Muted: #4E6280. Numbers: #22D3EE (cyan) or #4ADE80 (green) or {accent_color}.
+  ALL numbers AND metric labels: font-mono text-xs tracking-widest uppercase.
+  Layout: Dense Bloomberg-terminal feel. Multiple KPI panels. Thin 1px hairline borders.
+          Split: Left 60% = chart or KPI grid. Right 40% = vertical stat list.
+  Cards: bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.07)] rounded-lg NO shadow
+  Footer: One line, right-aligned only: font-mono text-[9px] text-[#2A3A50] with timestamp.
+  DO NOT use white cards or colored left-border accents.
+
+────────────────────────────────────────────────
+PERSONA: magazine_spread
+  Bg: #FDFAF5. Text: #1C1A17. Muted: #6B6455. Border: #E0D4BE.
+  Headlines: font-['Playfair_Display'] style="font-family:'Playfair Display',serif" font-bold
+             text-5xl to text-7xl — HUGE and DOMINANT. Use italic for pull-quotes.
+  Body: Inter. No font-mono except for very specific labels.
+  Layout (CHOOSE ONE based on data):
+    A) Full-height left band (38%): bg={accent_color}, large [[icon:NAME:96:white]] centered, 1-2 white labels.
+       Right (62%): white bg, editorial text grid.
+    B) Top 32% full-width: giant Playfair headline on warm bg. Bottom 68%: 2-3 col editorial cards.
+  Cards: bg-white border-b-2 border-[#E0D4BE] shadow-none rounded-none (editorial, NOT rounded-xl)
+  Pull quotes: Playfair italic text-3xl, border-l-4 border-[{accent_color}]
+  Footer: NONE. Editorial slides end with content, no footer strip.
+
+────────────────────────────────────────────────
+PERSONA: infographic_vibrant
+  Bg: {accent_color} AS FULL BACKGROUND (yes, solid vivid color fills entire slide).
+  Text on accent: #FFFFFF. Muted: rgba(255,255,255,0.72).
+  Cards: bg-white text-[#0F172A] rounded-2xl shadow-2xl (white pops against vivid bg)
+  Layout (CHOOSE ONE):
+    A) Central giant [[icon:NAME:128:white]] + radial arrangement of stat cards below/around
+    B) Top: big white number text-[140px] font-black centered. Below: horizontal white card row.
+    C) Left 45%: text content on accent bg (no cards). Right 55%: white card grid.
+  NO left-border card accents (bg is already the accent). No secondary backgrounds.
+  Geometric CSS shapes as decoration: style="clip-path:polygon(...)" or radial-gradient overlays
+  Footer: NONE.
+
+────────────────────────────────────────────────
+PERSONA: minimalist_focus
+  Bg: #FFFFFF. One accent color max.
+  Rule: ONE focal element takes 55%+ of the visible area. Everything else is whitespace.
+  Focal element — exactly ONE of:
+    • Giant number: style="font-size:96px;font-weight:900;color:{accent_color};line-height:1"
+    • Single Playfair blockquote: style="font-family:'Playfair Display',serif;font-style:italic;font-size:52px;font-weight:700;color:#1C1A17;line-height:1.2"
+    • Massive icon: [[icon:NAME:160:{accent_color}]]
+  Supporting text: text-sm text-[#94A3B8] centered 40px below focal element. 2-3 lines max.
+  Structure: just display:flex, align-items:center, justify-content:center, flex-direction:column, gap:32px
+  NO cards. NO header zone. NO footer. NO border lines. The whitespace IS the design.
+
+────────────────────────────────────────────────
+PERSONA: technical_dense
+  Bg: #131926 (dark navy, NOT pure black). Text: #A9B1D6. Accent: #7AA2F7 (blue) | #9ECE6A (green) | #F7768E (red).
+  ALL text including descriptions: font-mono (style="font-family:'JetBrains Mono',monospace")
+  Layout: LEFT panel (45%): vertical list of label+value rows, separated by 1px lines.
+          RIGHT panel (55%): Chart.js chart OR structured table OR status grid.
+  Cards: rounded-sm (4px max). Sharp edges. border border-[#1E2A40] bg-[#1C2333]. NO rounded-xl.
+  Numbers: colored by severity — critical={red}, warning={amber}, ok={green}, info=#7AA2F7
+  Font sizes: text-[11px] for most body. text-base max for titles. Dense information > whitespace.
+  Status bar footer (full width): bg-[#0D1320] border-t border-[#1E2A40] font-mono text-[9px]
+    left = system health indicator. right = timestamp. height ~28px.
+
+────────────────────────────────────────────────
+PERSONA: narrative_warm
+  Bg: #FFFBF0. Text: #1C1A17. Accent: warm variant of {accent_color} (amber/coral/orange tones).
+  Headlines: style="font-family:'Sora',sans-serif" font-bold text-4xl–text-5xl.
+  Body: Inter text-sm leading-relaxed (generous line-height, article feel).
+  Layout: Left-aligned like a magazine feature article — NOT centered.
+    Left margin 64px. Content flows naturally. No forced grid symmetry.
+    Use: one large left-aligned headline, a flowing paragraph, then a 2-col fact grid below.
+  Cards: bg-[#FEF9F0] border border-[#F5DEB3] rounded-2xl shadow-none (warm, soft, no harsh lines)
+  Pull quotes: Sora italic text-xl border-l-4 border-[{amber}] pl-5 text-[#6B6455]
+  Footer: NONE. Content ends naturally.
+
+────────────────────────────────────────────────
+PERSONA: vibrant_split
+  Layout: Strict vertical split. Left panel (40%) + Right panel (60%). They share the 1280px width.
+  Left panel: bg = the report accent color ({accent_color}). Content: ONE large [[icon:NAME:96:white]] + 1-2 lines white text.
+    style="width:40%;min-height:100%;background:{accent_color};display:flex;flex-direction:column;
+           align-items:center;justify-content:center;gap:20px;padding:40px;overflow:hidden;flex-shrink:0"
+  Right panel: bg = warm #FDFAF5. Contains all data cards/bullets/charts.
+    style="width:60%;min-height:100%;background:#FDFAF5;padding:40px 40px 40px 32px;display:flex;flex-direction:column;overflow:hidden;min-width:0"
+  Outer wrapper: style="display:flex;flex-direction:row;height:100%;width:100%;overflow:hidden;max-height:720px"
+  Right panel cards: bg-white border border-[#E8E0D0] rounded-xl shadow-sm (light, clean)
+  Right panel text: text-[#1C1A17]. Muted: text-[#6B6455]. Font: Inter.
+  Footer: NONE. The split IS the visual anchor.
+
+────────────────────────────────────────────────
+
+IMPLEMENTATION RULES:
+  • Use the persona-specified background, typography, and card style. No mixing personas.
+  • Design seed {design_seed}: >6000 = bolder/more dramatic interpretation of your persona.
+                                <3000 = more refined/restrained interpretation of your persona.
+  • NO raw markdown (**bold** → <strong>). NO placeholder text. NO JSON visible on slide.
+  • content from SLIDE DATA only — never invent values.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ★ CONTENT DENSITY — CRITICAL
@@ -1913,76 +2106,78 @@ Slides MUST be information-rich, NOT just decorative boxes.
         triggering thread pool exhaustion and 1,847 queued requests."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  VISUAL TYPE GUIDE
+  ★ STEP 3 — VISUAL TYPE GUIDE
+  (content structure — apply within your persona's visual language)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 cover_hero:
   Full-bleed cover. CSS geometric bg (repeating-linear-gradient or radial-gradient).
-  CRITICAL: Use this EXACT structure to prevent bottom card clipping:
-  <div class="h-full w-full flex flex-col overflow-hidden" style="background:{bg}; background-image:...">
-    <!-- Top: logo badge + title block — ~200px -->
-    <div class="px-12 pt-8 flex-shrink-0">
-      small badge pill (audience/version) + giant title text-5xl–text-6xl + subtitle text-xl
-    </div>
-    <!-- Middle: decorative element — flex-1 fills remaining -->
-    <div class="flex-1 min-h-0 flex items-center justify-center px-12">
-      optional large [[icon:NAME:96:COLOR]] or CSS decoration
-    </div>
-    <!-- Bottom: 3 preview cards — FIXED height, NO overflow -->
-    <div class="px-10 pb-6 flex-shrink-0 grid grid-cols-3 gap-4" style="height:160px">
-      3 cards each: [[icon:NAME:36:COLOR]] + bold title text-base + 1-line desc text-sm
-      Cards: rounded-xl bg-[{card}]/20 backdrop-blur p-4 border border-white/10
-    </div>
-  </div>
-  The bottom cards MUST use flex-shrink-0 + fixed height so they never get clipped.
+  Top: badge pill + giant title text-5xl–text-6xl + subtitle text-xl.
+  Middle: flex-1 decorative element (large [[icon:NAME:96:COLOR]] or CSS decoration).
+  Bottom: preview card strip — flex-shrink-0 fixed height 160px.
+  ★ DATA-ADAPTIVE: count topics in data to decide how many preview cards (2–4), not always 3.
+  Cards: [[icon:NAME:36:COLOR]] + bold title + 1-line desc. Use bg-[{card}]/20 p-4 rounded-xl.
 
 big_number_hero:
-  Left 55%: giant number text-[140px] or text-9xl font-black in accent.
-  Label text-2xl below. 2-3 supporting stat badges. Context sentence text-lg.
-  Right 45%: large [[icon:NAME:96:COLOR]] centered. Optional mini doughnut chart.
+  Use when data has ONE dominant numeric value that tells the story.
+  Left 55%: giant number text-[140px] font-black in accent. Label + context sentence text-lg.
+  Supporting stat badges = exactly the supporting_stats items in data (render all, not a fixed N).
+  Right 45%: large [[icon:NAME:96:COLOR]] centered. Optional mini doughnut if data has breakdown.
 
 stat_cards_row:
-  Title row with [[icon:NAME:32:COLOR]] right side.
-  4-card grid: each card has [[icon:NAME:40:COLOR]] top-right, big number text-4xl,
-  label, sub-label, colored top border (border-t-4).
-  ★ BELOW each number: a text-xs description paragraph (2-3 sentences) explaining what
-  the metric means and why it matters. Cards must NOT be just a number and label.
+  Use for 3–6 numeric metrics. Grid columns = item count (3 items → 3 cols, 5 items → 2+3).
+  Each card: [[icon:NAME:40:COLOR]] top-right, big number text-4xl, label, colored border-t-4.
+  ★ BELOW each number: text-xs description paragraph (2-3 sentences) explaining the metric.
+  Cards must NOT be just a number and label — always add meaningful description text.
+  If data has 7+ metrics: switch to a two-column table layout instead of cards.
 
 bar_chart_annotated:
-  Left 40%: headline + 3-4 key bullets each with [[icon:NAME:20:COLOR]] + bold title +
-  metric badge + text-xs description sentence explaining the bullet.
-  Right 60%: Chart.js bar chart. Below: 2 insight callout boxes (border-l-4) with full-sentence text.
+  Use when data has ≥3 labeled numeric values for comparison.
+  Left 40%: headline + bullet list (render ALL bullets from data, not fixed to 3-4).
+  Each bullet: [[icon:NAME:20:COLOR]] + bold title + metric badge + text-xs description.
+  Right 60%: Chart.js bar chart with data labels. Below: 2 insight callouts (border-l-4).
+  ★ If data has no numeric comparisons → switch to two_column_bullets instead.
 
 area_chart_gradient:
-  Title + 3 stat pills top. Full-width Chart.js area/line with gradient fill.
-  Real timestamps on x-axis. Annotation at peak value.
+  Use ONLY when data contains timestamps or sequential time-indexed values.
+  Title + stat pills (match pill count to data items). Full-width Chart.js area with gradient.
+  Real timestamps on x-axis from data. Annotation badge at peak/notable value.
+  ★ If data has no time series → use bar_chart_annotated or stat_cards_row instead.
 
 timeline_events:
-  Horizontal timeline: dots on a line, each event has [[icon:NAME:24:COLOR]],
-  date label, short description. Color dots by event type/severity.
+  Use for events/milestones with dates or sequence numbers.
+  Horizontal dots on a line (or vertical if ≥8 events). Each event:
+  [[icon:NAME:24:COLOR]] + date/seq label + bold title + 1-line description.
+  Color-code dots by event type/severity from data. Render ALL events from data.
 
 topology_map:
-  Title + legend. CSS grid of node cards (no SVG arrows needed).
-  Each card: [[icon:NAME:32:COLOR]] + node name in font-mono + status badge pill.
-  Group cards into labeled zones with subtle bg color.
+  Use for infrastructure, network nodes, or system components.
+  Title + legend row. CSS grid of node cards grouped into labeled zones.
+  Each card: [[icon:NAME:32:COLOR]] + node name font-mono + status badge pill.
+  Zone count and node count = what the data provides — do not invent extra nodes.
 
 matrix_table:
-  Dark header row. Alternating row backgrounds. First column bold with [[icon:NAME:20:COLOR]].
-  Colored badge cells. Uppercase tracking-widest column headers.
+  Use for structured data with multiple attributes per row (3+ columns).
+  Dark header row. Alternating bg rows. First col bold + [[icon:NAME:20:COLOR]].
+  Colored badge cells for status/priority values. Track row count from data exactly.
 
 domino_chain:
-  Horizontal: 4-6 cards with chevron-right between them.
+  Use for cause-effect sequences, pipelines, or step-by-step processes.
+  Cards in horizontal chain with → arrows between. Count of cards = steps in data.
   Each card: colored top border, [[icon:NAME:32:COLOR]], bold title, 2-line body.
-  Summary strip below spanning full width.
+  Summary strip below. ★ For >6 steps, use 2-row zigzag instead of single horizontal row.
 
 comparison_panel:
+  Use when data explicitly compares TWO things (tools, approaches, before/after).
   Two equal panels side by side. Each: colored header + [[icon:NAME:40:COLOR]] + label.
-  Content inside: Chart.js mini bar OR 3-4 stat rows.
+  Inner content: stat rows (render all from data), NOT a fixed 3-4 rows.
+  Optional Chart.js mini bars if data has numeric comparisons.
 
 priority_table:
-  Styled HTML table. Columns: Item | Priority | Action.
-  First col: [[icon:NAME:20:COLOR]] + bold name. Priority: colored pill.
-  Alternating row backgrounds.
+  Use for ranked/prioritized lists of items with actionable states.
+  Styled HTML table. Columns derived from data keys (not always Item|Priority|Action).
+  First col: [[icon:NAME:20:COLOR]] + bold name. Priority: colored pill badge.
+  Alternating row backgrounds. Row count = data item count exactly.
 
 scatter_quadrant:
   2×2 CSS grid (Impact/Effort, Risk/Value axes).
@@ -2150,11 +2345,36 @@ callout_hero:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Start with exactly: <div class="h-full w-full flex flex-col overflow-hidden" style="background:{bg}; max-height:720px;">
-Generate complete, specific HTML now. Use [[icon:NAME:SIZE:COLOR]] for ALL icons.
-Remember: flex-1 min-h-0 on main content, flex-shrink-0 on header/footer.
-★ CONTENT DENSITY CHECK: Every card/bullet MUST have a multi-sentence description rendered
-  as visible text. Slides with only titles and numbers will be rejected."""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ STEP 4 — GENERATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You have now:
+  1. Analyzed the data (types, counts, structure)
+  2. Applied your aesthetic persona (background, typography, cards, layout)
+  3. Chosen the content structure that fits the data
+
+OUTER WRAPPER — adapt to your persona:
+  • editorial_dark:   <div class="h-full w-full" style="background:#0F1629;max-height:720px;overflow:hidden;">
+  • data_dashboard:   <div class="h-full w-full" style="background:#0A1020;background-image:repeating-linear-gradient(rgba(255,255,255,0.025) 1px,transparent 1px),repeating-linear-gradient(90deg,rgba(255,255,255,0.025) 1px,transparent 1px);background-size:40px 40px;max-height:720px;overflow:hidden;">
+  • technical_dense:  <div class="h-full w-full flex" style="background:#131926;max-height:720px;overflow:hidden;">
+  • vibrant_split:    <div style="display:flex;flex-direction:row;height:100%;width:100%;overflow:hidden;max-height:720px">
+  • minimalist_focus: <div class="h-full w-full flex flex-col items-center justify-center" style="background:#FFFFFF;max-height:720px;overflow:hidden">
+  • magazine_spread:  <div class="h-full w-full flex flex-col overflow-hidden" style="background:#FDFAF5;max-height:720px;">
+  • narrative_warm:   <div class="h-full w-full flex flex-col overflow-hidden" style="background:#FFFBF0;max-height:720px;">
+  • infographic_vibrant: <div class="h-full w-full flex flex-col overflow-hidden" style="background:{accent_color};max-height:720px;">
+  • Others: <div class="h-full w-full flex flex-col overflow-hidden" style="background:[persona-bg];max-height:720px;">
+
+Use [[icon:NAME:SIZE:COLOR]] for ALL icons. No hand-drawn SVGs.
+For non-vibrant_split layouts: flex-1 min-h-0 on main, flex-shrink-0 on header/footer zones.
+
+★ FINAL CHECKLIST before outputting:
+  □ Persona background and typography applied (not default #EFF6FF + white cards)
+  □ Item count in HTML matches SLIDE DATA exactly (no padding, no cutting)
+  □ Every card/bullet has a multi-sentence description with real insight
+  □ No fake data — every value from SLIDE DATA
+  □ Layout is NOT the generic 3-zone header/content/footer if persona specifies otherwise
+  □ This slide looks DIFFERENT from a standard white-card slide
+  □ Slides with generic white cards + light blue bg will be REJECTED by the critic"""
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2599,6 +2819,8 @@ def _generate_slide(slide: dict, style: dict,
     if len(_slide_json) > _data_cap:
         _slide_json = _slide_json[:_data_cap] + "\n... [truncated]"
 
+    aesthetic_persona = slide.get('aesthetic_persona', 'editorial_dark')
+
     # Build the prompt
     prompt = DESIGNER_PROMPT.format(
         slot               = slot,
@@ -2611,6 +2833,7 @@ def _generate_slide(slide: dict, style: dict,
         color_mood         = mood,
         accent_color       = accent,
         design_seed        = seed,
+        aesthetic_persona  = aesthetic_persona,
         slide_data         = _slide_json,
         feedback           = feedback or "None — produce your best first attempt.",
         bg                 = style.get('bg',     '#F5F0E8'),
@@ -2647,6 +2870,8 @@ def _generate_slide(slide: dict, style: dict,
             html_text = substitute_icon_placeholders(html_text)
             # Add Chart.js layout padding to prevent axis labels being clipped
             html_text = _fix_chartjs_padding(html_text)
+            # Clamp overflow-causing padding and font-size values
+            html_text = _fix_overflow(html_text)
             return html_text
 
         preview = raw[:120].replace('\n', ' ')
@@ -2688,7 +2913,8 @@ def _generate_slide(slide: dict, style: dict,
 
 def run(plan: dict,
         feedback: Optional[dict] = None,
-        slides_to_redo: Optional[list] = None) -> list[tuple[int, Optional[str]]]:
+        slides_to_redo: Optional[list] = None,
+        output_format: str = "pdf") -> list[tuple[int, Optional[str]]]:
     """
     Generate HTML for all slides (or only slides_to_redo in patch mode).
     Returns list of (slot, html_content | None).
@@ -2714,6 +2940,8 @@ def run(plan: dict,
     results: list[tuple[int, Optional[str]]] = []
 
     # Build per-slot feedback map
+    _persona_change_kw = {'persona', 'vibrant', 'split', 'editorial', 'infographic',
+                          'background to #', 'bg to', 'navy', 'green background', 'cream background'}
     slot_feedback: dict[int, str] = {}
     if feedback and feedback.get('slides_to_fix'):
         for sf in feedback['slides_to_fix']:
@@ -2721,6 +2949,12 @@ def run(plan: dict,
             problem = sf.get('problem', '')
             fix     = sf.get('fix', '')
             hint    = sf.get('prev_content_hint', '')
+            # For PPTX, skip feedback that asks to change the background/persona —
+            # the plan's unified theme must be maintained.
+            if output_format == "pptx":
+                combined = (problem + fix).lower()
+                if any(kw in combined for kw in _persona_change_kw):
+                    continue
             slot_feedback[s] = (
                 f"PROBLEM: {problem}. "
                 f"FIX: {fix}. "

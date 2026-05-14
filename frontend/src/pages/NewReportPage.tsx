@@ -1,408 +1,459 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
-
+import { useRef, useState } from "react";
+import {
+  Upload, Type, Code, Zap, Download, Settings2, ChevronDown,
+  ChevronUp, X, FileText, Loader2, CheckCircle2, Sparkles, Globe, Presentation,
+} from "lucide-react";
+import toast from "react-hot-toast";
 import { renderFile, renderJson } from "@/api/client";
-import type {
-  AgentModels,
-  Provider,
-  RenderJsonBody,
-  VisualStyle,
-} from "@/api/types";
+import type { Provider, VisualStyle } from "@/api/types";
 
 type InputMode = "text" | "file" | "json";
 
-const emptyAgentModels = (): AgentModels => ({
-  analyzer: "",
-  planner: "",
-  designer: "",
-  assembler: "",
-  critic: "",
-});
+const PIPELINE_STAGES_BASE = [
+  { label: "Analyzing content",        pct: 15 },
+  { label: "Planning narrative",        pct: 30 },
+  { label: "Designing slides",          pct: 65 },
+  { label: "Assembling document",       pct: 85 },
+  { label: "Running quality checks",    pct: 95 },
+  { label: "Exporting",                 pct: 100 },
+];
 
-function buildOptions(
-  provider: Provider | "",
-  modelAll: string,
-  agents: AgentModels,
-  visualStyle: VisualStyle | "",
-  maxIterations: string,
-  passThreshold: string,
-  designSeed: string,
-  htmlOnly: boolean,
-  credentialIds: string,
-): Record<string, unknown> {
-  const o: Record<string, unknown> = {};
-  if (provider) o.provider = provider;
-  const ma = modelAll.trim();
-  if (ma) o.model_all = ma;
-  const models: AgentModels = {};
-  let hasAgent = false;
-  (["analyzer", "planner", "designer", "assembler", "critic"] as const).forEach(
-    (k) => {
-      const v = agents[k]?.trim();
-      if (v) {
-        models[k] = v;
-        hasAgent = true;
-      }
-    },
-  );
-  if (hasAgent) o.models = models;
-  if (visualStyle) o.visual_style = visualStyle;
-  const mi = parseInt(maxIterations, 10);
-  if (!Number.isNaN(mi)) o.max_iterations = mi;
-  const pt = parseFloat(passThreshold);
-  if (!Number.isNaN(pt)) o.pass_threshold = pt;
-  const ds = parseInt(designSeed, 10);
-  if (!Number.isNaN(ds)) o.design_seed = ds;
-  o.html_only = htmlOnly;
-  const ids = credentialIds
-    .split(/[\s,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (ids.length) o.credential_ids = ids;
-  return o;
+const PIPELINE_STAGES_BROWSER = [
+  { label: "Web research",              pct: 12 },
+  { label: "Analyzing content",        pct: 25 },
+  { label: "Planning narrative",        pct: 38 },
+  { label: "Designing slides",          pct: 70 },
+  { label: "Assembling document",       pct: 87 },
+  { label: "Running quality checks",    pct: 96 },
+  { label: "Exporting",                 pct: 100 },
+];
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
 }
 
 export function NewReportPage() {
-  const queryClient = useQueryClient();
-  const [inputMode, setInputMode] = useState<InputMode>("text");
-  const [text, setText] = useState("");
-  const [jsonText, setJsonText] = useState('{\n  "example": true\n}');
-  const [file, setFile] = useState<File | null>(null);
-
-  const [provider, setProvider] = useState<Provider | "">("");
-  const [modelAll, setModelAll] = useState("");
-  const [agents, setAgents] = useState<AgentModels>(emptyAgentModels);
-  const [visualStyle, setVisualStyle] = useState<VisualStyle | "">("notebooklm");
-  const [maxIterations, setMaxIterations] = useState("5");
-  const [passThreshold, setPassThreshold] = useState("7");
-  const [designSeed, setDesignSeed] = useState("");
-  const [htmlOnly, setHtmlOnly] = useState(false);
-  const [credentialIds, setCredentialIds] = useState("");
-
+  const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode]         = useState<InputMode>("text");
+  const [text, setText]         = useState("");
+  const [jsonText, setJsonText] = useState("{}");
+  const [file, setFile]         = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [showOpts, setShowOpts] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewKind, setPreviewKind] = useState<"pdf" | "html" | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [previewType, setPreviewType] = useState<"pdf" | "pptx" | "html" | null>(null);
+  const [stageIdx, setStageIdx] = useState(0);
 
-  const optionsPayload = useMemo(
-    () =>
-      buildOptions(
-        provider,
-        modelAll,
-        agents,
-        visualStyle,
-        maxIterations,
-        passThreshold,
-        designSeed,
-        htmlOnly,
-        credentialIds,
-      ),
-    [
-      provider,
-      modelAll,
-      agents,
-      visualStyle,
-      maxIterations,
-      passThreshold,
-      designSeed,
-      htmlOnly,
-      credentialIds,
-    ],
-  );
+  // Options state
+  const [provider, setProvider]     = useState<Provider>("openrouter");
+  const [modelAll, setModelAll]     = useState("google/gemini-3.1-flash-lite-preview");
+  const [style, setStyle]           = useState<VisualStyle>("auto");
+  const [iterations, setIterations] = useState(3);
+  const [threshold, setThreshold]   = useState(7.5);
+  const [htmlOnly, setHtmlOnly]     = useState(false);
+  const [browserEnabled, setBrowserEnabled] = useState(false);
+  const [browserMaxPages, setBrowserMaxPages] = useState(5);
+  const [outputFormat, setOutputFormat] = useState<"pdf" | "pptx">("pdf");
 
-  useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
-
-  const runMutation = useMutation({
+  const mut = useMutation({
     mutationFn: async () => {
-      setError(null);
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-        setPreviewUrl(null);
-        setPreviewKind(null);
-      }
+      // Advance stages while waiting
+      setStageIdx(0);
+      let idx = 0;
+      const timer = setInterval(() => {
+        if (idx < PIPELINE_STAGES.length - 1) {
+          idx++;
+          setStageIdx(idx);
+        }
+      }, 12000);
 
-      const opts = optionsPayload;
-
-      if (inputMode === "file") {
-        if (!file) throw new Error("Choose a file");
-        return renderFile({
-          file,
-          options: opts,
-        });
-      }
-
-      if (inputMode === "text") {
-        const t = text.trim();
-        if (!t) throw new Error("Enter text");
-        const body = { ...opts, text: t } as RenderJsonBody;
-        return renderJson(body);
-      }
-
-      let structured: Record<string, unknown>;
+      const opts = {
+        provider, model_all: modelAll || undefined,
+        visual_style: style, max_iterations: iterations,
+        pass_threshold: threshold, html_only: htmlOnly,
+        output_format: outputFormat,
+        ...(browserEnabled && {
+          browser_enabled: true,
+          browser_max_pages: browserMaxPages,
+        }),
+      };
       try {
-        structured = JSON.parse(jsonText) as Record<string, unknown>;
-        if (structured === null || typeof structured !== "object")
-          throw new Error("JSON must be an object");
-      } catch {
-        throw new Error("Invalid JSON object");
+        if (mode === "file" && file) {
+          return await renderFile({ file, options: opts });
+        } else if (mode === "json") {
+          let parsed: Record<string, unknown>;
+          try { parsed = JSON.parse(jsonText); } catch { throw new Error("Invalid JSON"); }
+          return await renderJson({ structured: parsed, ...opts });
+        } else {
+          return await renderJson({ text, ...opts });
+        }
+      } finally {
+        clearInterval(timer);
+        setStageIdx(PIPELINE_STAGES.length - 1);
       }
-      const body = { ...opts, structured } as RenderJsonBody;
-      return renderJson(body);
     },
-    onSuccess: (result) => {
-      const { blob, contentType } = result;
+    onSuccess: ({ blob, contentType, filename }) => {
+      qc.invalidateQueries({ queryKey: ["jobs"] });
+      qc.invalidateQueries({ queryKey: ["admin-stats"] });
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       const url = URL.createObjectURL(blob);
       setPreviewUrl(url);
-      if (
-        contentType?.includes("pdf") ||
-        blob.type === "application/pdf"
-      ) {
-        setPreviewKind("pdf");
-      } else {
-        setPreviewKind("html");
-      }
-      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      setPreviewType(
+        contentType?.includes("presentationml") ? "pptx"
+        : contentType?.includes("pdf") ? "pdf"
+        : "html"
+      );
+      toast.success("Report generated successfully!");
     },
-    onError: (err: Error) => {
-      setError(err.message);
-    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Generation failed"),
   });
 
-  function setAgentField(key: keyof AgentModels, value: string) {
-    setAgents((prev) => ({ ...prev, [key]: value }));
+  const exportLabel = htmlOnly ? "Exporting HTML" : outputFormat === "pptx" ? "Exporting PPTX" : "Exporting PDF";
+  const _stagesBase = browserEnabled ? PIPELINE_STAGES_BROWSER : PIPELINE_STAGES_BASE;
+  const PIPELINE_STAGES = _stagesBase.map((s, i, arr) =>
+    i === arr.length - 1 ? { ...s, label: exportLabel } : s
+  );
+  const currentStage = PIPELINE_STAGES[stageIdx];
+  const progress = mut.isPending ? currentStage.pct : (mut.isSuccess ? 100 : 0);
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault(); setDragging(false);
+    const f = e.dataTransfer.files[0];
+    if (f) { setFile(f); setMode("file"); }
   }
 
-  return (
-    <div className="mx-auto flex max-w-6xl flex-col gap-6 lg:flex-row">
-      <div className="min-w-0 flex-1 space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-ink">New report</h1>
-          <p className="mt-1 text-sm text-ink-muted">
-            Provide a source, tune pipeline options, then generate PDF or HTML.
-          </p>
-        </div>
+  const canGenerate = mode === "text" ? text.trim().length > 0
+    : mode === "file" ? !!file
+    : jsonText.trim() !== "";
 
-        <div className="rounded-2xl border border-black/5 bg-surface-card p-5 shadow-sm">
-          <div className="text-sm font-medium text-ink">Source</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {(
-              [
-                ["text", "Paste text"],
-                ["file", "Upload file"],
-                ["json", "Structured JSON"],
-              ] as const
-            ).map(([mode, label]) => (
+  return (
+    <div className="p-6 max-w-5xl mx-auto animate-fade-in">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-7 h-7 rounded-lg bg-brand-soft flex items-center justify-center">
+            <Sparkles className="w-3.5 h-3.5 text-brand-light" />
+          </div>
+          <h1 className="text-xl font-bold text-txt-primary">New Report</h1>
+        </div>
+        <p className="text-sm text-txt-muted ml-9">Generate an executive PDF from your data</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
+        {/* Input panel */}
+        <div className="lg:col-span-3 space-y-4">
+          {/* Mode tabs */}
+          <div className="card p-1 flex gap-1">
+            {([
+              { id: "text", icon: Type,     label: "Paste Text" },
+              { id: "file", icon: Upload,   label: "Upload File" },
+              { id: "json", icon: Code,     label: "JSON Data" },
+            ] as const).map(({ id, icon: Icon, label }) => (
               <button
-                key={mode}
-                type="button"
-                onClick={() => setInputMode(mode)}
-                className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                  inputMode === mode
-                    ? "bg-ink text-white"
-                    : "bg-black/5 text-ink-muted hover:bg-black/10"
-                }`}
+                key={id}
+                onClick={() => setMode(id)}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium transition-all duration-150
+                  ${mode === id ? "bg-brand text-white" : "text-txt-muted hover:text-txt-primary hover:bg-bg-hover"}`}
               >
+                <Icon className="w-3.5 h-3.5" />
                 {label}
               </button>
             ))}
           </div>
 
-          {inputMode === "text" && (
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Paste document text…"
-              rows={12}
-              className="mt-4 w-full rounded-xl border border-black/10 bg-white p-3 font-mono text-sm outline-none ring-accent/30 focus:ring-2"
-            />
-          )}
-          {inputMode === "file" && (
-            <div className="mt-4">
-              <input
-                type="file"
-                accept=".pdf,.csv,.txt,.json,.md"
-                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-                className="text-sm"
+          {/* Text input */}
+          {mode === "text" && (
+            <div className="card overflow-hidden">
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Paste your data, logs, alerts, or any text content here…&#10;&#10;Supports infrastructure logs, metrics, CSV data, markdown, or plain text."
+                className="w-full h-64 bg-transparent p-4 text-sm text-txt-primary placeholder:text-txt-subtle resize-none outline-none font-mono"
               />
-              <p className="mt-2 text-xs text-ink-muted">
-                PDF, CSV, TXT, JSON, or Markdown.
-              </p>
+              <div className="flex justify-between items-center px-4 py-2 border-t border-border bg-bg-elevated/30">
+                <span className="text-xs text-txt-subtle">{text.length.toLocaleString()} chars</span>
+                {text && (
+                  <button onClick={() => setText("")} className="text-xs text-txt-subtle hover:text-err flex items-center gap-1">
+                    <X className="w-3 h-3" /> Clear
+                  </button>
+                )}
+              </div>
             </div>
           )}
-          {inputMode === "json" && (
-            <textarea
-              value={jsonText}
-              onChange={(e) => setJsonText(e.target.value)}
-              rows={12}
-              className="mt-4 w-full rounded-xl border border-black/10 bg-white p-3 font-mono text-sm outline-none ring-accent/30 focus:ring-2"
-            />
+
+          {/* File upload */}
+          {mode === "file" && (
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+              onClick={() => fileRef.current?.click()}
+              className={`card p-10 flex flex-col items-center justify-center cursor-pointer text-center transition-all duration-150
+                ${dragging ? "border-brand bg-brand-soft" : "hover:border-border-strong hover:bg-bg-elevated"}`}
+            >
+              <input
+                ref={fileRef} type="file"
+                accept=".txt,.csv,.pdf,.json,.md"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) setFile(f); }}
+              />
+              {file ? (
+                <>
+                  <div className="w-12 h-12 rounded-xl bg-ok-soft flex items-center justify-center mb-3">
+                    <FileText className="w-6 h-6 text-ok" />
+                  </div>
+                  <p className="text-sm font-medium text-txt-primary">{file.name}</p>
+                  <p className="text-xs text-txt-subtle mt-1">{(file.size / 1024).toFixed(1)} KB · Click to change</p>
+                </>
+              ) : (
+                <>
+                  <div className="w-12 h-12 rounded-xl bg-brand-soft flex items-center justify-center mb-3">
+                    <Upload className="w-6 h-6 text-brand-light" />
+                  </div>
+                  <p className="text-sm font-medium text-txt-primary">Drop file here or click to browse</p>
+                  <p className="text-xs text-txt-subtle mt-1">Supports .txt, .csv, .pdf, .json, .md</p>
+                </>
+              )}
+            </div>
           )}
-        </div>
 
-        <div className="rounded-2xl border border-black/5 bg-surface-card p-5 shadow-sm">
-          <div className="text-sm font-medium text-ink">Pipeline options</div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <label className="block text-xs font-medium text-ink-muted">
-              Provider
-              <select
-                value={provider}
-                onChange={(e) =>
-                  setProvider(e.target.value as Provider | "")
-                }
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm text-ink"
-              >
-                <option value="">(default)</option>
-                <option value="openrouter">openrouter</option>
-                <option value="gemini">gemini</option>
-                <option value="nvidia">nvidia</option>
-              </select>
-            </label>
-            <label className="block text-xs font-medium text-ink-muted">
-              Model (all agents)
-              <input
-                value={modelAll}
-                onChange={(e) => setModelAll(e.target.value)}
-                placeholder="e.g. model id"
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
+          {/* JSON input */}
+          {mode === "json" && (
+            <div className="card overflow-hidden">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-bg-elevated/30">
+                <Code className="w-3.5 h-3.5 text-txt-subtle" />
+                <span className="text-xs text-txt-muted font-mono">JSON</span>
+              </div>
+              <textarea
+                value={jsonText}
+                onChange={(e) => setJsonText(e.target.value)}
+                className="w-full h-60 bg-transparent p-4 text-sm text-txt-primary font-mono resize-none outline-none"
+                spellCheck={false}
               />
-            </label>
-            <label className="block text-xs font-medium text-ink-muted">
-              Visual style
-              <select
-                value={visualStyle}
-                onChange={(e) =>
-                  setVisualStyle(e.target.value as VisualStyle | "")
-                }
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              >
-                <option value="notebooklm">notebooklm</option>
-                <option value="modern">modern</option>
-                <option value="dark">dark</option>
-                <option value="auto">auto</option>
-              </select>
-            </label>
-            <label className="block text-xs font-medium text-ink-muted">
-              Max iterations
-              <input
-                type="number"
-                min={1}
-                max={20}
-                value={maxIterations}
-                onChange={(e) => setMaxIterations(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              />
-            </label>
-            <label className="block text-xs font-medium text-ink-muted">
-              Pass threshold
-              <input
-                type="number"
-                step="0.1"
-                min={0}
-                max={10}
-                value={passThreshold}
-                onChange={(e) => setPassThreshold(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              />
-            </label>
-            <label className="block text-xs font-medium text-ink-muted">
-              Design seed (optional)
-              <input
-                type="number"
-                value={designSeed}
-                onChange={(e) => setDesignSeed(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              />
-            </label>
-          </div>
-          <div className="mt-4">
-            <div className="text-xs font-medium text-ink-muted">
-              Per-agent models (optional)
             </div>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {(
-                [
-                  "analyzer",
-                  "planner",
-                  "designer",
-                  "assembler",
-                  "critic",
-                ] as const
-              ).map((k) => (
-                <input
-                  key={k}
-                  value={agents[k] ?? ""}
-                  onChange={(e) => setAgentField(k, e.target.value)}
-                  placeholder={k}
-                  className="rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-                />
-              ))}
-            </div>
-          </div>
-          <label className="mt-4 flex items-center gap-2 text-sm text-ink">
-            <input
-              type="checkbox"
-              checked={htmlOnly}
-              onChange={(e) => setHtmlOnly(e.target.checked)}
-            />
-            HTML only (skip PDF)
-          </label>
-          <label className="mt-3 block text-xs font-medium text-ink-muted">
-            Credential IDs (comma-separated)
-            <input
-              value={credentialIds}
-              onChange={(e) => setCredentialIds(e.target.value)}
-              placeholder="uuid …"
-              className="mt-1 w-full rounded-lg border border-black/10 bg-white px-3 py-2 font-mono text-sm"
-            />
-          </label>
-        </div>
+          )}
 
-        {error && (
-          <div className="rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </div>
-        )}
+          {/* Options accordion */}
+          <div className="card overflow-hidden">
+            <button
+              onClick={() => setShowOpts(!showOpts)}
+              className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-txt-muted hover:text-txt-primary transition-colors"
+            >
+              <span className="flex items-center gap-2">
+                <Settings2 className="w-4 h-4" />
+                Pipeline Options
+              </span>
+              {showOpts ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
 
-        <button
-          type="button"
-          disabled={runMutation.isPending}
-          onClick={() => runMutation.mutate()}
-          className="rounded-xl bg-accent px-6 py-3 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-60"
-        >
-          {runMutation.isPending ? "Generating…" : "Generate"}
-        </button>
-      </div>
+            {showOpts && (
+              <div className="px-4 pb-4 pt-1 grid grid-cols-2 gap-4 border-t border-border">
+                <div>
+                  <label className="label">Provider</label>
+                  <select value={provider} onChange={(e) => setProvider(e.target.value as Provider)} className="select">
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="nvidia">NVIDIA</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Model</label>
+                  <input value={modelAll} onChange={(e) => setModelAll(e.target.value)} className="input" placeholder="google/gemini-3.1-flash-lite-preview" />
+                </div>
+                <div>
+                  <label className="label">Visual Style</label>
+                  <select value={style} onChange={(e) => setStyle(e.target.value as VisualStyle)} className="select">
+                    <option value="auto">Auto (AI picks)</option>
+                    <option value="notebooklm">NotebookLM</option>
+                    <option value="modern">Modern</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Max Iterations</label>
+                  <input type="number" min={1} max={5} value={iterations} onChange={(e) => setIterations(+e.target.value)} className="input" />
+                </div>
+                <div>
+                  <label className="label">Pass Threshold (0–10)</label>
+                  <input type="number" min={0} max={10} step={0.5} value={threshold} onChange={(e) => setThreshold(+e.target.value)} className="input" />
+                </div>
+                <div className="flex items-center gap-3 pt-5">
+                  <input id="html-only" type="checkbox" checked={htmlOnly} onChange={(e) => setHtmlOnly(e.target.checked)}
+                    className="w-4 h-4 rounded accent-brand-light" />
+                  <label htmlFor="html-only" className="text-sm text-txt-muted cursor-pointer">HTML only (skip export)</label>
+                </div>
 
-      <div className="w-full shrink-0 lg:w-[44%]">
-        <div className="sticky top-6 rounded-2xl border border-black/5 bg-surface-card p-4 shadow-sm">
-          <div className="text-sm font-medium text-ink">Preview</div>
-          <p className="mt-1 text-xs text-ink-muted">
-            Output appears here when generation completes.
-          </p>
-          <div className="mt-4 min-h-[480px] overflow-hidden rounded-xl border border-black/10 bg-white">
-            {previewUrl && previewKind === "pdf" && (
-              <iframe
-                title="PDF preview"
-                src={previewUrl}
-                className="h-[min(70vh,720px)] w-full"
-              />
-            )}
-            {previewUrl && previewKind === "html" && (
-              <iframe
-                title="HTML preview"
-                src={previewUrl}
-                className="h-[min(70vh,720px)] w-full"
-                sandbox="allow-scripts allow-same-origin"
-              />
-            )}
-            {!previewUrl && (
-              <div className="flex h-[min(70vh,720px)] items-center justify-center text-sm text-ink-muted">
-                No preview yet
+                {/* Output format selector */}
+                <div className="col-span-2">
+                  <label className="label mb-1.5">Output Format</label>
+                  <div className="flex gap-2">
+                    {(["pdf", "pptx"] as const).map((fmt) => (
+                      <button
+                        key={fmt}
+                        type="button"
+                        disabled={htmlOnly}
+                        onClick={() => setOutputFormat(fmt)}
+                        className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium border transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed ${
+                          outputFormat === fmt && !htmlOnly
+                            ? "border-brand-light bg-brand-soft text-brand-light"
+                            : "border-border text-txt-muted hover:border-border-strong hover:text-txt-primary"
+                        }`}
+                      >
+                        {fmt === "pdf"
+                          ? <FileText className="w-3.5 h-3.5" />
+                          : <Presentation className="w-3.5 h-3.5" />}
+                        {fmt === "pdf" ? "PDF" : "PowerPoint"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Browser agent toggle — spans full width */}
+                <div className="col-span-2 rounded-xl border border-border bg-bg-elevated/40 p-3 space-y-2">
+                  <div className="flex items-center gap-3">
+                    <input
+                      id="browser-enabled"
+                      type="checkbox"
+                      checked={browserEnabled}
+                      onChange={(e) => setBrowserEnabled(e.target.checked)}
+                      className="w-4 h-4 rounded accent-brand-light flex-shrink-0"
+                    />
+                    <label htmlFor="browser-enabled" className="flex items-center gap-2 text-sm text-txt-muted cursor-pointer">
+                      <Globe className="w-3.5 h-3.5 text-brand-light" />
+                      Web Research Agent
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-brand-soft text-brand-light font-mono">Beta</span>
+                    </label>
+                  </div>
+                  {browserEnabled && (
+                    <div className="pl-7 animate-fade-in">
+                      <p className="text-[11px] text-txt-subtle leading-relaxed mb-2">
+                        Searches the web for facts, statistics, and recent data before generating slides.
+                        Best for short topic inputs (not raw data files).
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs text-txt-subtle">Max pages:</label>
+                        <input
+                          type="number" min={1} max={20} value={browserMaxPages}
+                          onChange={(e) => setBrowserMaxPages(+e.target.value)}
+                          className="input w-16 text-xs py-1"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
+          </div>
+
+          {/* Generate button */}
+          <button
+            onClick={() => mut.mutate()}
+            disabled={mut.isPending || !canGenerate}
+            className="btn-primary w-full justify-center py-3 text-base"
+          >
+            {mut.isPending ? (
+              <><Loader2 className="w-5 h-5 animate-spin" /> Generating…</>
+            ) : (
+              <><Zap className="w-5 h-5" /> Generate Report</>
+            )}
+          </button>
+
+          {/* Progress */}
+          {mut.isPending && (
+            <div className="card p-4 animate-fade-in">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-medium text-txt-muted">{currentStage.label}…</span>
+                <span className="text-xs text-brand-light font-mono">{progress}%</span>
+              </div>
+              <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-violet-500 to-indigo-600 rounded-full transition-all duration-[3s] ease-out"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <div className="flex gap-2 mt-3 flex-wrap">
+                {PIPELINE_STAGES.map((s, i) => (
+                  <span key={s.label}
+                    className={`text-[10px] px-2 py-0.5 rounded-full ${i <= stageIdx ? "bg-brand-soft text-brand-light" : "bg-bg-elevated text-txt-subtle"}`}
+                  >
+                    {i < stageIdx ? "✓ " : ""}{s.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Preview panel */}
+        <div className="lg:col-span-2">
+          <div className="card h-full min-h-[500px] flex flex-col overflow-hidden sticky top-6">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <span className="text-sm font-medium text-txt-muted">Preview</span>
+              {previewUrl && (
+                <button
+                  onClick={() => {
+                    const ext = previewType === "pdf" ? ".pdf" : previewType === "pptx" ? ".pptx" : ".html";
+                    const a = document.createElement("a");
+                    a.href = previewUrl; a.download = `report${ext}`;
+                    a.click();
+                  }}
+                  className="btn-primary px-3 py-1.5 text-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {previewType === "pptx" ? "Download PPTX" : "Download"}
+                </button>
+              )}
+            </div>
+
+            <div className="flex-1 flex items-center justify-center bg-bg-elevated/30 relative">
+              {previewUrl && previewType === "pptx" ? (
+                <div className="text-center px-8">
+                  <div className="w-16 h-16 rounded-2xl bg-ok-soft flex items-center justify-center mx-auto mb-4">
+                    <Presentation className="w-8 h-8 text-ok" />
+                  </div>
+                  <p className="text-txt-primary text-sm font-medium">PowerPoint ready!</p>
+                  <p className="text-txt-subtle text-xs mt-1 leading-relaxed">
+                    Click Download PPTX to save your presentation.
+                  </p>
+                </div>
+              ) : previewUrl ? (
+                <iframe
+                  src={previewUrl}
+                  className="w-full h-full border-0"
+                  title="Report Preview"
+                  sandbox={previewType === "html" ? "allow-scripts allow-same-origin" : undefined}
+                />
+              ) : mut.isPending ? (
+                <div className="text-center">
+                  <div className="w-16 h-16 rounded-2xl bg-brand-soft flex items-center justify-center mx-auto mb-4">
+                    <Loader2 className="w-8 h-8 text-brand-light animate-spin" />
+                  </div>
+                  <p className="text-txt-muted text-sm font-medium">Generating report…</p>
+                  <p className="text-txt-subtle text-xs mt-1">This usually takes 2–5 minutes</p>
+                </div>
+              ) : mut.isSuccess ? (
+                <div className="text-center">
+                  <CheckCircle2 className="w-10 h-10 text-ok mx-auto mb-3" />
+                  <p className="text-txt-primary text-sm font-medium">Report ready!</p>
+                </div>
+              ) : (
+                <div className="text-center px-8">
+                  <div className="w-16 h-16 rounded-2xl bg-bg-elevated flex items-center justify-center mx-auto mb-4">
+                    <FileText className="w-8 h-8 text-txt-subtle" />
+                  </div>
+                  <p className="text-txt-muted text-sm font-medium">Preview appears here</p>
+                  <p className="text-txt-subtle text-xs mt-1 leading-relaxed">
+                    Generate a report to see the PDF preview
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

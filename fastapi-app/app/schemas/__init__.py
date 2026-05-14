@@ -1,5 +1,5 @@
 from app.schemas.auth import LoginRequest, TokenResponse
-from app.schemas.chat import ChatMessageCreate, ChatMessageOut, ChatThreadCreate, ChatThreadOut
+from app.schemas.chat import ChatMessageCreate, ChatMessageOut, ChatRequest, ChatThreadCreate, ChatThreadOut
 from app.schemas.job import JobOut
 from app.schemas.llm_key import LLMKeyCreate, LLMKeyOut
 from app.schemas.preferences import PreferencesBody, PreferencesOut
@@ -24,4 +24,5 @@ __all__ = [
     "ChatThreadOut",
     "ChatMessageCreate",
     "ChatMessageOut",
+    "ChatRequest",
 ]

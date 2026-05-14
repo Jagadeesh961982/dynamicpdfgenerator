@@ -76,6 +76,10 @@ def _options_to_runtime(opts: RenderOptions | PreferencesBody) -> dict[str, Any]
         out["MAX_DATA_CHARS"] = d["max_data_chars"]
     if isinstance(opts, RenderOptions) and opts.design_seed is not None:
         out["DESIGN_SEED"] = opts.design_seed
+    if isinstance(opts, RenderOptions) and opts.browser_enabled is not None:
+        out["BROWSER_ENABLED"] = opts.browser_enabled
+    if isinstance(opts, RenderOptions) and opts.browser_max_pages is not None:
+        out["BROWSER_MAX_PAGES"] = opts.browser_max_pages
     return out
 
 

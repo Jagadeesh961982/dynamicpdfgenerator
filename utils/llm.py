@@ -609,6 +609,79 @@ def _call_openrouter(prompt: str, model: str,
 
 
 # ══════════════════════════════════════════════════════════════════
+#  NVIDIA NIM
+# ══════════════════════════════════════════════════════════════════
+
+def _call_nvidia(prompt: str, model: str,
+                 max_tokens: int = 8000,
+                 retries: int = 3,
+                 json_mode: bool = False) -> str:
+    api_key = getattr(config, "NVIDIA_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "\n❌  NVIDIA API key not configured!\n"
+            "   Set NVIDIA_API_KEY in .env or environment.\n"
+            "   Get key from: https://build.nvidia.com/\n"
+        )
+
+    url = "https://integrate.api.nvidia.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+
+    last_error = None
+    for attempt in range(retries):
+        try:
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(url, data, headers)
+            with urllib.request.urlopen(req, timeout=180) as r:
+                result = json.loads(r.read())
+            choice = result["choices"][0]
+            content = choice["message"]["content"]
+            if choice.get("finish_reason") == "length":
+                print(f"  ⚠ Response truncated at max_tokens={max_tokens}")
+            return content
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code == 429:
+                wait = 15 * (2 ** attempt)
+                print(f"  Rate limited — waiting {wait}s (NVIDIA)")
+                time.sleep(wait)
+                last_error = e
+            elif e.code == 401:
+                raise RuntimeError(f"NVIDIA 401 Unauthorized. Check NVIDIA_API_KEY.")
+            elif e.code == 400:
+                if json_mode and "response_format" in body:
+                    print("  NVIDIA model doesn't support response_format — retrying without")
+                    payload.pop("response_format", None)
+                    last_error = e
+                else:
+                    raise RuntimeError(f"NVIDIA 400: {body[:300]}")
+            else:
+                raise RuntimeError(f"NVIDIA HTTP {e.code}: {body[:300]}")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_error = e
+            if attempt < retries - 1:
+                print(f"  Retry {attempt + 1}: {e}")
+                time.sleep(10)
+
+    raise RuntimeError(f"NVIDIA failed after {retries} attempts: {last_error}")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  GEMINI DIRECT
 # ══════════════════════════════════════════════════════════════════
 
@@ -687,9 +760,11 @@ def call(prompt: str,
     NEVER for designer — it needs raw HTML output.
     """
     provider = getattr(config, "PROVIDER", "openrouter")
+    model = _resolve_model(key)
     if provider == "openrouter":
-        model = _resolve_model(key)
         return _call_openrouter(prompt, model, max_tokens, retries, json_mode)
+    elif provider == "nvidia":
+        return _call_nvidia(prompt, model, max_tokens, retries, json_mode)
     else:
         return _call_gemini(prompt, key, max_tokens, retries, json_mode)
 
@@ -727,3 +802,77 @@ def call_json(prompt: str,
         time.sleep(4)
 
     raise ValueError(f"Could not parse JSON after {retries} attempts")
+
+
+def call_messages(
+    messages: list[dict],
+    model: str | None = None,
+    max_tokens: int = 4000,
+    retries: int = 3,
+) -> str:
+    """
+    Call LLM with OpenAI-style messages array for multi-turn conversations.
+    Used by the chat endpoint. Supports openrouter, nvidia, and gemini providers.
+    """
+    provider = getattr(config, "PROVIDER", "openrouter")
+    if model is None:
+        model = _resolve_model("planner")
+
+    if provider in ("openrouter", "nvidia"):
+        if provider == "nvidia":
+            api_key = getattr(config, "NVIDIA_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError("NVIDIA_API_KEY not configured. Set it in .env.")
+            url = "https://integrate.api.nvidia.com/v1/chat/completions"
+            headers: dict = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            }
+        else:
+            keys = _openrouter_key_list()
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {keys[0]}",
+                "HTTP-Referer": getattr(config, "OPENROUTER_SITE_URL", ""),
+                "X-Title": getattr(config, "OPENROUTER_SITE_NAME", "PDF Generator"),
+            }
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": max_tokens,
+        }
+        last_error = None
+        for attempt in range(retries):
+            try:
+                data = json.dumps(payload).encode()
+                req = urllib.request.Request(url, data, headers)
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    result = json.loads(r.read())
+                return result["choices"][0]["message"]["content"]
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                if e.code == 429:
+                    wait = 10 * (2 ** attempt)
+                    print(f"  Chat rate limited — waiting {wait}s")
+                    time.sleep(wait)
+                    last_error = e
+                else:
+                    raise RuntimeError(f"HTTP {e.code}: {body[:300]}")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < retries - 1:
+                    time.sleep(5)
+        raise RuntimeError(f"call_messages failed after {retries} attempts: {last_error}")
+
+    else:
+        # Gemini: flatten messages to a single prompt (multi-turn via text)
+        flat = "\n".join(
+            f"{m['role'].upper()}: {m['content']}"
+            for m in messages
+        )
+        return _call_gemini(flat, "planner", max_tokens, retries)

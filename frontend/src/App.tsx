@@ -1,4 +1,5 @@
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 
 import { AppShell } from "@/components/AppShell";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
@@ -14,8 +15,8 @@ function GuestRoute() {
   const { token, loading } = useAuth();
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-surface">
-        <p className="text-ink-muted">Loading…</p>
+      <div className="flex min-h-screen items-center justify-center bg-bg-page">
+        <Loader2 className="h-6 w-6 animate-spin text-brand" />
       </div>
     );
   }
@@ -27,15 +28,15 @@ export default function App() {
   return (
     <Routes>
       <Route element={<GuestRoute />}>
-        <Route path="/login" element={<LoginPage />} />
+        <Route path="/login"    element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
       </Route>
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
-          <Route index element={<HomePage />} />
-          <Route path="report" element={<NewReportPage />} />
-          <Route path="chat" element={<ChatPage />} />
-          <Route path="settings" element={<SettingsPage />} />
+          <Route index             element={<HomePage />} />
+          <Route path="report"     element={<NewReportPage />} />
+          <Route path="chat"       element={<ChatPage />} />
+          <Route path="settings"   element={<SettingsPage />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

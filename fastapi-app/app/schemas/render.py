@@ -25,6 +25,9 @@ class RenderOptions(BaseModel):
     design_seed: int | None = None
     html_only: bool = False
     credential_ids: list[str] | None = None
+    browser_enabled: bool | None = Field(None, description="Enable web research agent for topic inputs")
+    browser_max_pages: int | None = Field(None, ge=1, le=20, description="Max pages to fetch (1-20)")
+    output_format: Literal["pdf", "pptx"] = "pdf"
 
 
 class RenderJsonBody(RenderOptions):

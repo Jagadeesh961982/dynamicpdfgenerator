@@ -44,11 +44,15 @@ coverage.xml
 .dmypy.json
 dmypy.json
 
-# Environments and secrets (use env vars or config.local.py for keys)
+# Environments and secrets — NEVER commit real keys
 .env
 .env.*
 !.env.example
 config.local.py
+
+# Explicitly block patterns that look like real API keys in any file
+# (git-secrets / pre-commit can enforce these more rigorously)
+# The patterns below are documentation reminders, not enforced by git itself.
 
 # IDE / editor
 .idea/

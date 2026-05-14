@@ -98,6 +98,17 @@ body {{
   box-sizing: border-box;
 }}
 
+/* ── Global text-overflow prevention ────────────────────────── */
+.slide * {{
+  box-sizing: border-box;
+  min-width: 0;              /* prevents flex children overflowing their container */
+  word-break: break-word;
+  overflow-wrap: break-word;
+}}
+.slide p, .slide span, .slide h1, .slide h2, .slide h3, .slide h4, .slide li {{
+  max-width: 100%;
+}}
+
 /* ── Slide number badge ──────────────────────────────────────── */
 .slide-num {{
   position: absolute;
@@ -127,6 +138,10 @@ body {{
   display: flex;
   align-items: center;
   gap: 5px;
+  max-width: 420px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }}
 
 /* ── Nav overlay (browser preview only) ─────────────────────── */

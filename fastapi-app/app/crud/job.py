@@ -42,3 +42,8 @@ def list_for_user(db: Session, user_id: str, limit: int) -> list[Job]:
 def save(db: Session, job: Job) -> None:
     db.commit()
     db.refresh(job)
+
+
+def delete_job(db: Session, job: Job) -> None:
+    db.delete(job)
+    db.commit()

@@ -38,3 +38,8 @@ def add_message(db: Session, *, thread_id: str, role: str, content: str) -> Chat
     db.commit()
     db.refresh(msg)
     return msg
+
+
+def delete_thread(db: Session, thread: ChatThread) -> None:
+    db.delete(thread)
+    db.commit()

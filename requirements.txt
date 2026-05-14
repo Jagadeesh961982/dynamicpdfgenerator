@@ -20,6 +20,19 @@ playwright>=1.40.0
 # Option B — pdfkit (needs wkhtmltopdf binary installed separately)
 # pdfkit>=1.0.0
 
+# ── Browser / Web Research Agent ──────────────────────────────────
+# Optional — only needed when BROWSER_ENABLED=true
+duckduckgo-search>=6.0.0     # DuckDuckGo search (no API key required)
+requests>=2.31.0             # HTTP page fetching
+beautifulsoup4>=4.12.0       # HTML parsing
+lxml>=5.0.0                  # Fast HTML parser backend for BeautifulSoup
+
+# ── Environment variable / .env support ───────────────────────────
+python-dotenv>=1.0.0
+
+# ── PPTX export (optional) ────────────────────────────────────────────
+python-pptx>=0.6.21
+
 # ── HTTP API (optional) — run from fastapi-app/: uvicorn app.main:app ──
 fastapi>=0.110.0                     # ASGI routes
 uvicorn[standard]>=0.27.0            # production server

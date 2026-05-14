@@ -985,7 +985,7 @@ import config
 #  CHUNKER — format-agnostic, no regex assumptions
 # ══════════════════════════════════════════════════════════════════
 
-def _chunk_text(raw: str, max_chunk_chars: Optional | None = None) -> list[str]:
+def _chunk_text(raw: str, max_chunk_chars: Optional[int] = None) -> list[str]:
     if max_chunk_chars is None:
         max_chunk_chars = int(getattr(config, "CHUNK_MAX_CHARS", 8000))
     raw = raw.strip()
@@ -1122,6 +1122,26 @@ If the input is a question or topic (e.g. "explain AWS", "make a PDF on ML"),
 you MUST populate key_facts with 15-20 REAL, ACCURATE, SPECIFIC facts from your knowledge.
 Include real numbers, real names, real architecture details. Be an expert, not a generalist.
 
+DOMAIN KNOWLEDGE GUIDE — when input mentions these topics, ALWAYS use these REAL names in key_facts
+and key_entities. NEVER return "Team A", "Venue A", "Player X" or any placeholder:
+
+Cricket / IPL:
+  Teams (10): Mumbai Indians (MI), Chennai Super Kings (CSK), Royal Challengers Bengaluru (RCB),
+              Sunrisers Hyderabad (SRH), Kolkata Knight Riders (KKR), Delhi Capitals (DC),
+              Punjab Kings (PBKS), Rajasthan Royals (RR), Gujarat Titans (GT),
+              Lucknow Super Giants (LSG)
+  Venues: Wankhede Stadium (Mumbai), MA Chidambaram Stadium (Chennai), Eden Gardens (Kolkata),
+          M. Chinnaswamy Stadium (Bengaluru), Narendra Modi Stadium (Ahmedabad),
+          Arun Jaitley Stadium (Delhi), Rajiv Gandhi International Stadium (Hyderabad)
+  Batters: Rohit Sharma, Virat Kohli, Shubman Gill, KL Rahul, Rishabh Pant,
+           Ruturaj Gaikwad, Yashasvi Jaiswal, Abhishek Sharma, Sanju Samson
+  Bowlers/All-rounders: Jasprit Bumrah, Hardik Pandya, MS Dhoni, Pat Cummins,
+                        Rashid Khan, Sunil Narine, Ravindra Jadeja, Mohammed Shami, Kagiso Rabada
+
+Other sports — always use real team names, real stadium names, real player names.
+Finance — use real companies, real indices (Nifty 50, S&P 500), real market names.
+ABSOLUTE RULE: "Team A / B / C", "Venue A / B", "Player X / Y" are FORBIDDEN — use actual names.
+
 Return ONLY valid JSON:
 {{
   "content_type": "...",
@@ -1162,28 +1182,100 @@ RAW SOURCE EXCERPT (for additional context):
 AVAILABLE ICON NAMES (use ONLY these exact names in the "icon" fields):
 {icon_list}
 
-VISUAL TYPES — choose the best fit, vary them across slides:
-  cover_hero           → Full-bleed cover: giant title + 3 preview insight cards
-  big_number_hero      → One massive stat fills the slide (text-9xl, context below)
-  stat_cards_row       → 4 equal metric/concept cards in a grid
-  bar_chart_annotated  → Chart.js bar chart with callout annotations
-  area_chart_gradient  → Chart.js area/line chart showing trend over time
-  timeline_events      → Horizontal timeline of key events with milestones
-  topology_map         → CSS node/card diagram — system architecture or concept map
-  matrix_table         → HTML comparison table (teams × dimensions, options × criteria)
-  domino_chain         → Horizontal cause-effect cards with arrows between them
-  comparison_panel     → Two equal panels, each with chart or stats inside
-  priority_table       → Styled action table: Item | Priority | Action columns
-  risk_impact_matrix   → ★ 2×2 Risk/Impact quadrant — REQUIRED for alerts/logs/incidents
-                         Left 65%: four quadrants (High/Low Impact × High/Low Effort)
-                         Each quadrant has real items from the data with icon + stat
-                         Right 35%: Strategic Guidance + Immediate Action callout
-  scatter_quadrant     → 2×2 grid (Impact vs Effort, Risk vs Value, etc.)
-  funnel_diagram       → Funnel/pipeline showing stages with counts
-  info_cards_grid      → 2×2 or 3×2 grid of rich content cards with icons
-  concept_diagram      → 3-6 step workflow with connectors (architecture, process)
-  two_column_bullets   → Left: key insight panel; Right: bullet list with icons
-  callout_hero         → Large pull-quote or key finding with supporting stats below
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ STEP 1 — UNDERSTAND THE DATA FIRST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before assigning any visual_type, reason about what data each slide will hold:
+
+A) DATA TYPE per theme — for each theme in the analysis, identify:
+   • Does it have numeric metrics / statistics? → stat_cards_row, big_number_hero, bar_chart_annotated
+   • Does it have time-ordered events or trends? → timeline_events, area_chart_gradient
+   • Does it compare exactly two things (tools, approaches, before/after)? → comparison_panel
+   • Does it describe a sequence of steps or a pipeline? → concept_diagram, domino_chain, funnel_diagram
+   • Does it have many items with attributes (tabular)? → matrix_table, priority_table
+   • Does it have 2×2 prioritization (risk/effort, impact/value)? → scatter_quadrant
+     (risk_impact_matrix is RESERVED for operational content only — see Rule 10)
+   • Does it have architecture or topology (nodes, zones, services)? → topology_map
+   • Does it have rich descriptive text with a few supporting stats? → two_column_bullets, info_cards_grid
+   • Does it have ONE dominant finding or quote? → big_number_hero, callout_hero
+   • Is it a cover / intro / conclusion? → cover_hero, priority_table
+
+B) ITEM COUNT — count the natural number of items for each slide:
+   • The "data" items count MUST match what the source actually contains.
+   • Do NOT pad to reach a "nice" number (e.g., don't add fake 4th card if only 3 items exist).
+   • Do NOT truncate real data to fit a fixed template (e.g., don't cut 7 items to 4).
+   • 2 items → 2-col layout (comparison_panel or 2-card side-by-side)
+   • 3 items → 3-col row
+   • 4–6 items → 2×2 or 2×3 grid
+   • 7+ items → table/list layout, NOT a card grid
+
+C) VISUAL TYPE SELECTION — rules:
+   • visual_type must match the data type you identified in (A)
+   • stat_cards_row is for NUMERIC metrics — NOT for descriptive text themes
+   • area_chart_gradient only when data has timestamps or sequential numeric series
+   • comparison_panel only when data is explicitly binary (A vs B)
+   • concept_diagram / domino_chain only when data has ordered steps
+   • Use info_cards_grid or two_column_bullets when data is primarily text-based
+   • NEVER force numeric chart types on text-only data
+   • NEVER force a 4-card grid when the data has 2 or 7 items
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ AESTHETIC PERSONAS — assign one per slide
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Each slide MUST have an `aesthetic_persona` field. The designer uses this to apply a completely
+different visual language to each slide — background, typography, card style, layout structure.
+
+Available personas:
+  editorial_dark      — Near-black bg, Playfair Display serif headlines, asymmetric layout, no white cards
+  data_dashboard      — Dark bg with subtle grid, all-monospace numbers, KPI-dense, Bloomberg terminal feel
+  magazine_spread     — Warm white bg, giant Playfair headlines, left-band accent, editorial structure
+  infographic_vibrant — Solid accent color AS background, white card pops, dramatic central focal point
+  minimalist_focus    — Pure white, ONE massive focal element (giant number/quote/icon), 70% whitespace
+  technical_dense     — Dark blue-gray, ALL monospace text, sharp cards, Tokyo Night color palette
+  narrative_warm      — Cream bg, Sora headlines, article-like flowing layout, soft warm cards
+  vibrant_split       — Hard left/right split: dark colored panel + white panel, maximum contrast
+
+PERSONA ASSIGNMENT RULES (CRITICAL — enforce strictly):
+  1. Slide 1 (cover_hero): always "magazine_spread" or "vibrant_split"
+  2. Final slide (takeaways): always "editorial_dark" or "narrative_warm"
+  3. NO two adjacent slides may share the same aesthetic_persona
+  4. No persona may appear more than ⌈total_slides/4⌉ times in the whole deck
+  5. Dark personas (editorial_dark, data_dashboard, technical_dense) must be spaced at least
+     2 slides apart from each other
+  6. Suggested cycling pattern for 12 slides (warm → dark → accent flow):
+     1:magazine_spread, 2:editorial_dark, 3:infographic_vibrant, 4:narrative_warm,
+     5:data_dashboard, 6:vibrant_split, 7:minimalist_focus, 8:technical_dense,
+     9:magazine_spread, 10:editorial_dark, 11:infographic_vibrant, 12:narrative_warm
+     NOTE: Dark personas use DARK NAVY (#0F1629) not pure black — transitions look cohesive.
+  7. Adapt the cycle based on content type:
+     - Ops/incident content → more data_dashboard + technical_dense
+     - Educational content → more magazine_spread + narrative_warm
+     - Business reports → more editorial_dark + vibrant_split
+     - Data analysis → more data_dashboard + infographic_vibrant
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  VISUAL TYPES — with data-adaptive guidance
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  cover_hero           → Full-bleed cover. Preview cards = number of key themes (2–4, not always 3).
+  big_number_hero      → When ONE dominant numeric stat tells the story. Supporting stats = all available.
+  stat_cards_row       → For N numeric metrics (N = actual count, grid adapts: 3-col, 4-col, 2×3).
+  bar_chart_annotated  → When ≥3 labeled numeric values need comparison. Bullets = all key findings.
+  area_chart_gradient  → ONLY when data has timestamps or sequential numeric series (trend over time).
+  timeline_events      → For events with dates/sequence. Event count = actual events in data.
+  topology_map         → For infrastructure nodes, services, or concept maps. Node count = data count.
+  matrix_table         → For tabular data with 3+ columns. Row count = actual data rows.
+  domino_chain         → For cause-effect chains or pipelines. Card count = actual steps in data.
+  comparison_panel     → ONLY when comparing exactly 2 things (A vs B). Each panel = one side.
+  priority_table       → For ranked/actionable lists. Row count = actual items.
+  risk_impact_matrix   → ★ REQUIRED for alerts/logs/incidents/performance_metrics content.
+                         Left: 2×2 quadrant grid. Right: Strategic Guidance + Immediate Action.
+                         Each quadrant filled with real items from data — none left empty.
+  scatter_quadrant     → For 2×2 priority mapping (impact/effort, risk/value). Items = all data items.
+  funnel_diagram       → For pipeline stages with counts. Stage count = actual stages.
+  info_cards_grid      → For descriptive text themes. Card count = actual topics (not forced to 4).
+  concept_diagram      → For step-by-step flows. Step count = actual steps (3–6 ideal, adapt if more).
+  two_column_bullets   → Left: key insight + metric badge. Right: bullet list. Bullets = all items.
+  callout_hero         → When ONE finding is so important it deserves full-slide treatment.
 
 COLOR MOODS:
   critical_red    → #C0392B accent (urgent, broken, failure)
@@ -1194,34 +1286,63 @@ COLOR MOODS:
   deep_purple     → #6B46C1 accent (innovation, AI, future)
   teal_focus      → #0D9488 accent (process, flow, systems)
 
-RULES — read carefully:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ★ STEP 2 — RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. Slide 1 MUST be cover_hero. Final slide MUST be a conclusion/takeaways slide.
 2. Use at LEAST 6 different visual_types across all slides.
 3. Titles must be JOURNALISTIC and SPECIFIC — not generic labels.
    BAD: "System Overview" | GOOD: "Why Three Services Went Dark at 3AM"
 4. The "data" field must contain ALL values the designer needs to render the slide.
    Include real numbers, real names, real labels — never say "see analysis".
-   ★ CONTENT DENSITY: Each slide's "data" MUST be RICH and DETAILED:
-   - For card/grid slides (stat_cards_row, info_cards_grid): provide 4-6 items, each with
-     "title", "value"/"stat", "description" (2-3 full sentences explaining the item), and "icon".
-   - For bullet slides (two_column_bullets, priority_table): provide 4-6 bullet items, each with
-     "title", "description" (2-3 informative sentences — NOT a one-word label), and "metric".
-   - For chart slides: include data arrays AND 3-4 key_takeaways (each a full sentence).
-   - For timeline slides: include 4-6 events each with "date", "title", "description" (2 sentences).
+   ★ CONTENT DENSITY — data items must be rich AND match actual content count:
+   - Item count in "data" = natural count from the source, NOT a fixed 4 or 6.
+   - Each item needs: "title", "value"/"stat" (if numeric), "description" (2-3 full sentences), "icon".
+   - Descriptions must explain WHY the metric matters, not just repeat the number.
+   - For chart slides: include full data arrays AND key_takeaways (one sentence per insight).
+   - For timeline slides: each event needs "date"/"seq", "title", "description" (2 sentences).
    - BAD data: {{"facts": ["High CPU"]}}
    - GOOD data: {{"items": [{{"title": "CPU Saturation on SIDCSAPHRIAPP", "value": "94.3%",
      "description": "Application server CPU peaked at 94.3% sustained for 47 minutes between
-     03:12-03:59 IST, triggering thread pool exhaustion and 1,847 queued requests. This correlates
-     with the Kafka consumer lag spike on the same host.", "icon": "cpu"}}]}}
+     03:12-03:59 IST, triggering thread pool exhaustion and 1,847 queued requests. This directly
+     caused the Kafka consumer lag spike and 1,847 queued downstream requests.", "icon": "cpu"}}]}}
    The designer renders EXACTLY what you put in data — thin data = empty-looking slides.
 5. story_angle must explain WHY this slide matters to the audience.
 6. For "icon" fields in data: use ONLY names from the AVAILABLE ICON NAMES list above.
 7. Each slide needs a unique visual_type — minimize repeats.
-8. "visual_description" must be detailed enough for a designer to render from scratch.
-9. If data_richness is "low", use your knowledge to create REAL data values in the data field.
-   Populate EACH slide with 4-6 content items that have full multi-sentence descriptions.
-10. ★ MANDATORY for content_type=alerts/logs/incidents/performance_metrics:
-    MUST include exactly ONE slide with visual_type="risk_impact_matrix".
+8. "visual_description" must describe both the layout AND the data, specific enough to render from scratch.
+9. If data_richness is "low", use your knowledge to create REAL, ACCURATE data values.
+   Each item must have full multi-sentence descriptions with real facts, not placeholder text.
+11. ★ ANTI-PLACEHOLDER ENFORCEMENT — this is non-negotiable:
+    NEVER write "Team A", "Team B", "Venue A", "Venue B", "Player X", "Player Y",
+    "Franchise A", "Company A", "Organization X", or ANY other letter-suffixed placeholder.
+    Placeholders make slides look empty and useless. Replace every one with a REAL name.
+
+    Cricket / IPL — use these real names everywhere in "data":
+      Teams:   Mumbai Indians (MI), Chennai Super Kings (CSK), Royal Challengers Bengaluru (RCB),
+               Sunrisers Hyderabad (SRH), Kolkata Knight Riders (KKR), Delhi Capitals (DC),
+               Punjab Kings (PBKS), Rajasthan Royals (RR), Gujarat Titans (GT),
+               Lucknow Super Giants (LSG)
+      Venues:  Wankhede Stadium (Mumbai), MA Chidambaram Stadium (Chennai),
+               Eden Gardens (Kolkata), M. Chinnaswamy Stadium (Bengaluru),
+               Narendra Modi Stadium (Ahmedabad), Arun Jaitley Stadium (Delhi),
+               Rajiv Gandhi International Stadium (Hyderabad)
+      Batters: Rohit Sharma, Virat Kohli, Shubman Gill, KL Rahul, Rishabh Pant,
+               Ruturaj Gaikwad, Yashasvi Jaiswal, Abhishek Sharma, Sanju Samson
+      Bowlers: Jasprit Bumrah, Hardik Pandya, Pat Cummins, Rashid Khan,
+               Sunil Narine, Mohammed Shami, Kagiso Rabada, Ravindra Jadeja
+
+    Other domains — same rule: use real cities, real companies, real product names.
+    If exact 2026 figures are unknown, use best known historical data with "(est.)" suffix —
+    but NEVER replace the name itself with a letter placeholder.
+10. ★ risk_impact_matrix — STRICT GATE:
+    • ONLY allowed when content_type is ONE OF:
+      infrastructure_alerts, application_logs, incident_report, performance_metrics,
+      error_analysis, capacity_analysis, sre_runbook, security_audit
+    • FORBIDDEN for all other content types (research_paper, business_report, how_to_guide,
+      general_topic, tutorial, educational — and ANY topic where the input is not actual
+      operational/log/alert data). DO NOT add it just because a topic mentions "risk".
+    • When content_type IS one of the above: MUST include exactly ONE such slide.
     Use this EXACT data schema for that slide:
     {{
       "visual_type": "risk_impact_matrix",
@@ -1229,7 +1350,7 @@ RULES — read carefully:
         "x_axis_label": "IMPACT",
         "y_axis_label": "EFFORT",
         "high_impact_low_effort": [
-          {{"name": "Issue/item name", "icon": "icon-name", "stat": "primary metric", "detail": "host/source/context (optional)", "severity": "critical"}}
+          {{"name": "Issue/item name", "icon": "icon-name", "stat": "primary metric", "detail": "host/source/context", "severity": "critical"}}
         ],
         "high_impact_high_effort": [
           {{"name": "Issue/item name", "icon": "icon-name", "stat": "primary metric", "detail": "optional context", "severity": "high"}}
@@ -1246,9 +1367,9 @@ RULES — read carefully:
         "last_sync": "timestamp or data freshness label"
       }}
     }}
-    Populate EVERY quadrant with real items from the analysis — never empty.
-    When source data lists several distinct issues, put 2-4 items per quadrant (not just one).
-    Use "detail" for hostname, service, error class, or SLA impact so the matrix looks data-dense.
+    Populate EVERY quadrant with real items — never empty.
+    When source has several distinct issues, put 2-4 items per quadrant (not just one).
+    Use "detail" for hostname, service, error class, or SLA impact so the matrix is data-dense.
 
 Return ONLY valid JSON:
 {{
@@ -1263,11 +1384,12 @@ Return ONLY valid JSON:
       "story_angle": "Why this slide matters",
       "key_insight": "The one thing the reader takes away",
       "visual_type": "cover_hero",
-      "visual_description": "Detailed visual description",
+      "visual_description": "Detailed visual + data description for the designer",
       "layout_hint": "centered | left_text_right_visual | full_visual | header_plus_grid",
       "color_mood": "neutral_slate",
+      "aesthetic_persona": "magazine_spread",
       "data": {{
-        "key": "value — real data, real numbers"
+        "key": "value — real data, real numbers, item count matching actual content"
       }}
     }}
   ]
@@ -1293,6 +1415,34 @@ def _fallback_plan(analysis: dict) -> dict:
         'info_blue', 'warning_amber', 'neutral_slate',
         'critical_red', 'success_green', 'deep_purple', 'teal_focus',
     ]
+    # Aesthetic persona cycle — cohesive flow: warm → dark navy → accent → warm → dark → accent
+    # Dark personas now use navy (#0F1629) not pure black — transitions feel natural not jarring
+    ap_cycle = [
+        'magazine_spread',    # warm cream opener
+        'editorial_dark',     # dark navy
+        'infographic_vibrant',# accent pop
+        'narrative_warm',     # warm cream
+        'data_dashboard',     # dark navy grid
+        'vibrant_split',      # accent + warm split
+        'minimalist_focus',   # breath — white breathing room
+        'technical_dense',    # dark navy closer
+    ]
+    # Ops/incident content biases toward darker technical aesthetics
+    ALERT_TYPES_AP = {
+        'infrastructure_alerts', 'application_logs', 'incident_report',
+        'performance_metrics', 'error_analysis', 'capacity_analysis',
+    }
+    if content_type in ALERT_TYPES_AP:
+        ap_cycle = [
+            'data_dashboard',     # dark grid
+            'editorial_dark',     # dark navy editorial
+            'technical_dense',    # mono dense
+            'infographic_vibrant',# accent pop
+            'vibrant_split',      # split
+            'data_dashboard',     # back to grid
+            'editorial_dark',     # dark
+            'technical_dense',    # mono
+        ]
 
     # Determine if this is operational/alert content requiring risk matrix
     ALERT_TYPES = {
@@ -1302,6 +1452,8 @@ def _fallback_plan(analysis: dict) -> dict:
     }
     needs_risk_matrix = content_type in ALERT_TYPES
 
+    # Cover: preview cards = actual theme count (up to 4), not hardcoded 3
+    cover_themes = themes[:4]
     slides = [{
         'slot': 1,
         'title': title,
@@ -1309,15 +1461,19 @@ def _fallback_plan(analysis: dict) -> dict:
         'story_angle': 'Set the stage with key highlights',
         'key_insight': analysis.get('subject', ''),
         'visual_type': 'cover_hero',
-        'visual_description': f'Cover with title "{title}", subtitle, and 3 preview theme cards.',
+        'visual_description': (
+            f'Cover with title "{title}", subtitle, and {len(cover_themes)} preview theme cards '
+            f'({", ".join(cover_themes)}).'
+        ),
         'layout_hint': 'centered',
         'color_mood': 'neutral_slate',
+        'aesthetic_persona': 'magazine_spread',
         'data': {
             'title': title,
             'subtitle': subtitle,
             'preview_cards': [
-                {'title': t, 'description': 'Key topic', 'icon': 'lightbulb'}
-                for t in themes[:3]
+                {'title': t, 'description': f'Key aspect of this report', 'icon': 'lightbulb'}
+                for t in cover_themes
             ],
         },
     }]
@@ -1326,8 +1482,10 @@ def _fallback_plan(analysis: dict) -> dict:
         tf = [f for f in facts if f.get('category', '').lower() == theme.lower()]
         if not tf:
             tf = facts[max(0, i-2):min(i+1, len(facts))]
+
+        # Build items from ALL available facts for this theme — not capped at 6
         items = []
-        for j, f in enumerate(tf[:6]):
+        for j, f in enumerate(tf):
             fact_text = f.get('fact', '') if isinstance(f, dict) else str(f)
             items.append({
                 'title': fact_text.split('.')[0].strip() or f'Finding {j+1}',
@@ -1337,16 +1495,36 @@ def _fallback_plan(analysis: dict) -> dict:
             })
         if not items:
             items = [{'title': f'{theme} insight', 'value': '', 'description': f'Key insights about {theme}.', 'icon': 'info'}]
+
+        # Pick visual_type based on item count and data shape — not just a fixed cycle
+        n = len(items)
+        has_values = any(item.get('value') for item in items)
+        if n == 1:
+            vt = 'big_number_hero' if has_values else 'callout_hero'
+        elif n == 2:
+            vt = 'comparison_panel'
+        elif has_values and n <= 6:
+            vt = 'stat_cards_row'
+        elif has_values and n > 6:
+            vt = 'bar_chart_annotated'
+        elif n <= 6:
+            vt = 'info_cards_grid'
+        else:
+            vt = vt_cycle[(i - 2) % len(vt_cycle)]
+
         slides.append({
             'slot': i,
             'title': theme,
             'subtitle': f'Deep dive into {theme}',
             'story_angle': f'Analysis of {theme} — why it matters and what the data shows',
             'key_insight': tf[0].get('fact', f'Key insights about {theme}') if tf else f'Key insights about {theme}',
-            'visual_type': vt_cycle[(i - 2) % len(vt_cycle)],
-            'visual_description': f'Visual showing key aspects of {theme} with detailed data items.',
+            'visual_type': vt,
+            'visual_description': (
+                f'{vt} showing {n} items about {theme} with detailed data.'
+            ),
             'layout_hint': 'left_text_right_visual',
             'color_mood': cm_cycle[(i - 2) % len(cm_cycle)],
+            'aesthetic_persona': ap_cycle[(i - 2) % len(ap_cycle)],
             'data': {'theme': theme, 'items': items},
         })
 
@@ -1403,6 +1581,7 @@ def _fallback_plan(analysis: dict) -> dict:
             'visual_description': '2×2 risk/impact matrix with remediation guidance and system health status',
             'layout_hint': 'full_visual',
             'color_mood': 'critical_red',
+            'aesthetic_persona': 'technical_dense',
             'data': {
                 'x_axis_label': 'IMPACT',
                 'y_axis_label': 'EFFORT',
@@ -1435,6 +1614,7 @@ def _fallback_plan(analysis: dict) -> dict:
         'visual_description': 'Action table with key findings and next steps.',
         'layout_hint': 'full_visual',
         'color_mood': 'neutral_slate',
+        'aesthetic_persona': 'editorial_dark',
         'data': {'themes': themes[:6], 'top_facts': [f.get('fact', '') for f in facts[:5]]},
     })
 
@@ -1444,6 +1624,36 @@ def _fallback_plan(analysis: dict) -> dict:
         'audience': analysis.get('audience', 'General'),
         'slides': slides,
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PLAN QUALITY VALIDATION
+# ══════════════════════════════════════════════════════════════════
+
+import re as _re
+
+_PLACEHOLDER_PATTERNS = [
+    (r'\bTeam [A-Z]\b',        "team placeholder (e.g. 'Team A')"),
+    (r'\bVenue [A-Z]\b',       "venue placeholder (e.g. 'Venue A')"),
+    (r'\bPlayer [A-Z]\b',      "player placeholder (e.g. 'Player X')"),
+    (r'\bFranchise [A-Z]\b',   "franchise placeholder"),
+    (r'\bCompany [A-Z]\b',     "company placeholder"),
+    (r'\bOrganization [A-Z]\b',"organization placeholder"),
+    (r'\bCity [A-Z]\b',        "city placeholder"),
+    (r'\bTeam \d\b',           "numbered team placeholder (e.g. 'Team 1')"),
+    (r'\bVenue \d\b',          "numbered venue placeholder (e.g. 'Venue 1')"),
+]
+
+def _validate_plan_quality(plan: dict) -> list:
+    """Scan plan JSON for placeholder names; return list of warning strings."""
+    plan_str = json.dumps(plan)
+    warnings = []
+    for pattern, description in _PLACEHOLDER_PATTERNS:
+        matches = _re.findall(pattern, plan_str)
+        if matches:
+            unique = list(dict.fromkeys(matches))[:5]
+            warnings.append(f"{description}: {unique}")
+    return warnings
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1592,6 +1802,34 @@ def run(raw_data: str) -> dict:
     if not plan.get('slides'):
         print("  [Planner] No slides returned — using fallback plan")
         plan = _fallback_plan(analysis)
+
+    # Warn when the LLM used placeholder names despite instructions
+    quality_warnings = _validate_plan_quality(plan)
+    if quality_warnings:
+        print("  [Planner] WARNING — placeholder names detected in plan output:")
+        for w in quality_warnings:
+            print(f"    - {w}")
+        print("  [Planner] Hint: add more specific real-world names to the prompt topic next time.")
+
+    # Strip risk_impact_matrix slides injected by LLM for non-operational content
+    _OPS_TYPES = {
+        'infrastructure_alerts', 'application_logs', 'incident_report',
+        'performance_metrics', 'error_analysis', 'capacity_analysis',
+        'sre_runbook', 'security_audit',
+    }
+    content_type = analysis.get('content_type', '')
+    if content_type not in _OPS_TYPES:
+        before = len(plan.get('slides', []))
+        plan['slides'] = [
+            s for s in plan.get('slides', [])
+            if s.get('visual_type') != 'risk_impact_matrix'
+        ]
+        removed = before - len(plan['slides'])
+        if removed:
+            print(f"  [Planner] Stripped {removed} risk_impact_matrix slide(s) — content_type={content_type!r} is not operational")
+        # Re-number slots after removal
+        for idx, s in enumerate(plan['slides'], 1):
+            s['slot'] = idx
 
     # Attach analysis and raw sample for downstream agents
     plan['_analysis']    = analysis

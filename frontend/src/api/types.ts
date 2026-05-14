@@ -1,5 +1,4 @@
 export type Provider = "openrouter" | "gemini" | "nvidia";
-
 export type VisualStyle = "notebooklm" | "modern" | "dark" | "auto";
 
 export interface AgentModels {
@@ -20,6 +19,9 @@ export interface RenderOptions {
   design_seed?: number | null;
   html_only?: boolean;
   credential_ids?: string[] | null;
+  browser_enabled?: boolean | null;
+  browser_max_pages?: number | null;
+  output_format?: "pdf" | "pptx";
 }
 
 export interface RenderJsonBody extends RenderOptions {
@@ -95,4 +97,23 @@ export interface ChatMessageOut {
 export interface ChatMessageCreate {
   role: "user" | "assistant" | "system";
   content: string;
+}
+
+export interface ChatRequest {
+  message: string;
+  system_prompt?: string | null;
+}
+
+export interface AdminStats {
+  total_jobs: number;
+  done: number;
+  failed: number;
+  running: number;
+  member_since: string;
+}
+
+export interface JobStreamEvent {
+  status: string;
+  error: string | null;
+  completed_at: string | null;
 }
