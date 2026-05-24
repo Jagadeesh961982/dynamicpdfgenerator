@@ -44,11 +44,15 @@ coverage.xml
 .dmypy.json
 dmypy.json
 
-# Environments and secrets (use env vars or config.local.py for keys)
+# Environments and secrets — NEVER commit real keys
 .env
 .env.*
 !.env.example
 config.local.py
+
+# Explicitly block patterns that look like real API keys in any file
+# (git-secrets / pre-commit can enforce these more rigorously)
+# The patterns below are documentation reminders, not enforced by git itself.
 
 # IDE / editor
 .idea/
@@ -70,3 +74,43 @@ output/
 
 # Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Not for GitHub: local state, builds, caches ──────────────────
+
+# FastAPI / SQLite DB + job file storage (paths from app.core.config defaults)
+data/
+
+# Frontend — install & production build (regenerate with npm ci / npm run build)
+frontend/node_modules/
+frontend/dist/
+
+# Node (if tooling is added at repo root)
+node_modules/
+
+# Local databases anywhere in the tree
+*.sqlite3
+*.db
+
+# Secrets / keys (beyond .env)
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+*.p12
+
+# Playwright browser cache (if PLAYWRIGHT_BROWSERS_PATH points under repo)
+.playwright-browsers/
+ms-playwright/
+
+# Misc caches
+.cache/
+.parcel-cache/
+.turbo/
+*.tsbuildinfo
+
+# Jupyter
+.ipynb_checkpoints/

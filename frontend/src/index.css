@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    @apply bg-bg-page text-txt-primary antialiased font-sans;
+    min-height: 100vh;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-bg-elevated rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-bg-hover; }
+
+  /* Focus outline */
+  :focus-visible { @apply outline-none ring-2 ring-brand ring-offset-1 ring-offset-bg-page; }
+}
+
+@layer components {
+  .card {
+    @apply bg-bg-card border border-border rounded-xl;
+  }
+  .card-elevated {
+    @apply bg-bg-elevated border border-border rounded-xl;
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm
+           bg-brand hover:bg-brand-light active:scale-95
+           text-white transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm
+           text-txt-muted hover:text-txt-primary hover:bg-bg-hover
+           transition-all duration-150 disabled:opacity-40;
+  }
+  .btn-danger {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium text-sm
+           text-err hover:bg-err-soft transition-all duration-150;
+  }
+  .input {
+    @apply w-full bg-bg-surface border border-border rounded-lg px-3 py-2
+           text-sm text-txt-primary placeholder:text-txt-subtle
+           focus:outline-none focus:border-brand/60 focus:ring-1 focus:ring-brand/30
+           transition-colors;
+  }
+  .select {
+    @apply input appearance-none cursor-pointer;
+  }
+  .badge-ok   { @apply inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-ok-soft text-ok; }
+  .badge-err  { @apply inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-err-soft text-err; }
+  .badge-warn { @apply inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-warn-soft text-warn; }
+  .badge-info { @apply inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full bg-info-soft text-info; }
+  .label { @apply block text-xs font-medium text-txt-muted mb-1.5 uppercase tracking-wide; }
+}
+
+/* Gradient text utility */
+.gradient-text {
+  background: linear-gradient(135deg, #a78bfa, #7c3aed, #4f46e5);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glow effect */
+.glow-brand { box-shadow: 0 0 20px rgba(124,58,237,0.4); }
