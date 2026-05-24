@@ -60,6 +60,32 @@ def load(path: str) -> str:
     ext = p.suffix.lower()
     log(f"📂 Loading [cyan]{ext}[/cyan] — {p.name}")
 
+    # Image — Gemma 4 multimodal: extract all text/data from the image via vision API
+    if ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
+        import base64
+        with open(path, 'rb') as f:
+            img_bytes = f.read()
+        _MIME = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                 '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
+        mime = _MIME.get(ext, 'image/jpeg')
+        log(f"   {len(img_bytes):,} bytes — extracting via Gemma 4 vision")
+        try:
+            from utils.llm import call_vision
+            text = call_vision(
+                "You are a data extractor. Extract ALL text, numbers, labels, table data, "
+                "chart values, and any other information visible in this image. "
+                "Preserve structure and formatting. Be exhaustive — miss nothing.",
+                base64.b64encode(img_bytes).decode(),
+                mime,
+                key="analyzer",
+                max_tokens=4000,
+            )
+            log(f"   Vision extracted {len(text):,} chars")
+            return text[:config.MAX_DATA_CHARS]
+        except Exception as e:
+            log(f"   [yellow]Vision extraction failed: {e}[/yellow]")
+            return f"[Image file: {p.name}. Content could not be extracted: {e}]"
+
     # PDF
     if ext == '.pdf':
         try:
@@ -485,7 +511,7 @@ def run(input_path: str, output_path: str, html_only: bool = False, output_forma
 
 def main():
     p = argparse.ArgumentParser(description="NotebookLM-style PDF Generator")
-    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf)")
+    p.add_argument("--input",      required=True,  help="Input file (.txt/.csv/.pdf/.png/.jpg/.webp)")
     p.add_argument("--output",     default="output/report.pdf")
     p.add_argument("--iterations", type=int,   default=config.MAX_ITERATIONS)
     p.add_argument("--threshold",  type=float, default=config.PASS_THRESHOLD)

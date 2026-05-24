@@ -101,7 +101,11 @@ def merge_llm_keys_from_db(
 
     keys = [decrypt_secret(r.secret_enc) for r in rows]
     out: dict[str, Any] = {}
-    if provider == "openrouter":
+    if provider == "ollama":
+        # The stored "key" is the Ollama base URL (for remote/custom Ollama instances).
+        # Local default (http://localhost:11434) needs no stored credential.
+        out["OLLAMA_BASE_URL"] = keys[0]
+    elif provider == "openrouter":
         out["OPENROUTER_API_KEY"] = keys[0]
         out["OPENROUTER_API_KEYS"] = keys
     elif provider == "gemini":

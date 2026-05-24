@@ -40,6 +40,7 @@ export function SettingsPage() {
   });
 
   const [provider, setProvider] = useState<Provider>("openrouter");
+  const [ollamaUrl, setOllamaUrl] = useState("http://localhost:11434");
   const [modelAll, setModelAll] = useState("");
   const [style, setStyle] = useState<VisualStyle>("auto");
   const [iterations, setIterations] = useState(3);
@@ -51,6 +52,7 @@ export function SettingsPage() {
     if (!prefs) return;
     const s = prefs.settings as Record<string, unknown>;
     setProvider((s.provider as Provider) ?? "openrouter");
+    setOllamaUrl((s.ollama_base_url as string) ?? "http://localhost:11434");
     setModelAll((s.model_all as string) ?? "");
     setStyle((s.visual_style as VisualStyle) ?? "auto");
     setIterations((s.max_iterations as number) ?? 3);
@@ -79,6 +81,20 @@ export function SettingsPage() {
       max_data_chars: maxChars,
     });
   }
+
+  const PROVIDER_LABELS: Record<Provider, string> = {
+    ollama:      "Ollama (local Gemma 4 — free, private)",
+    openrouter:  "OpenRouter (cloud API)",
+    gemini:      "Gemini (Google AI Studio)",
+    nvidia:      "NVIDIA NIM",
+  };
+
+  const MODEL_PLACEHOLDERS: Record<Provider, string> = {
+    ollama:     "gemma4:27b",
+    openrouter: "google/gemma-4-31b-it:free",
+    gemini:     "gemma-4-27b-it",
+    nvidia:     "google/gemma-4-27b-it",
+  };
 
   // ── LLM Keys ─────────────────────────────────────────────────────
   const { data: keys = [], isLoading: keysLoading } = useQuery({
@@ -168,15 +184,30 @@ export function SettingsPage() {
               <div>
                 <label className="label">Default Provider</label>
                 <select value={provider} onChange={(e) => { setProvider(e.target.value as Provider); mark(); }} className="select">
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="gemini">Gemini</option>
-                  <option value="nvidia">NVIDIA</option>
+                  {(Object.keys(PROVIDER_LABELS) as Provider[]).map((p) => (
+                    <option key={p} value={p}>{PROVIDER_LABELS[p]}</option>
+                  ))}
                 </select>
               </div>
               <div>
                 <label className="label">Default Model</label>
-                <input value={modelAll} onChange={(e) => { setModelAll(e.target.value); mark(); }} className="input" placeholder="google/gemini-3.1-flash-lite-preview" />
+                <input value={modelAll} onChange={(e) => { setModelAll(e.target.value); mark(); }} className="input" placeholder={MODEL_PLACEHOLDERS[provider]} />
               </div>
+              {provider === "ollama" && (
+                <div className="col-span-2">
+                  <label className="label">Ollama Base URL</label>
+                  <input
+                    value={ollamaUrl}
+                    onChange={(e) => { setOllamaUrl(e.target.value); mark(); }}
+                    className="input font-mono text-xs"
+                    placeholder="http://localhost:11434"
+                  />
+                  <p className="text-[10px] text-txt-subtle mt-1">
+                    Local default needs no changes. Use a custom URL for remote Ollama instances.
+                    Pull Gemma 4 with: <code className="bg-bg-elevated px-1 rounded">ollama pull gemma4:27b</code>
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="label">Visual Style</label>
                 <select value={style} onChange={(e) => { setStyle(e.target.value as VisualStyle); mark(); }} className="select">
@@ -261,6 +292,7 @@ export function SettingsPage() {
                     <option value="openrouter">OpenRouter</option>
                     <option value="gemini">Gemini</option>
                     <option value="nvidia">NVIDIA</option>
+                    <option value="ollama">Ollama (remote URL)</option>
                   </select>
                 </div>
                 <div>
@@ -276,7 +308,7 @@ export function SettingsPage() {
                     value={keyValue}
                     onChange={(e) => setKeyValue(e.target.value)}
                     className="input pr-10 font-mono text-xs"
-                    placeholder="sk-or-v1-…"
+                    placeholder={keyProvider === "ollama" ? "http://my-ollama-server:11434" : keyProvider === "gemini" ? "AIza…" : keyProvider === "nvidia" ? "nvapi-…" : "sk-or-v1-…"}
                   />
                   <button
                     type="button"

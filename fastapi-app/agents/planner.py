@@ -1537,7 +1537,7 @@ def _fallback_plan(analysis: dict) -> dict:
         entities = analysis.get('key_entities', [])
 
         def _fact_to_item(
-            fact_str: str, idx: int, icon_name: str = 'alert-circle', severity: str = 'high',
+            fact_str: str, icon_name: str = 'alert-circle', severity: str = 'high',
         ) -> dict:
             s = (fact_str or '').strip()
             if not s:
@@ -1556,10 +1556,10 @@ def _fallback_plan(analysis: dict) -> dict:
                 'severity': severity,
             }
 
-        hi_lo_items = [_fact_to_item(f, i, 'zap', 'critical') for i, f in enumerate(critical[:4])]
-        hi_hi_items = [_fact_to_item(f, i, 'database', 'high') for i, f in enumerate(critical[4:8])]
-        lo_lo_items = [_fact_to_item(f, i, 'settings', 'low') for i, f in enumerate(low_f[:4])]
-        lo_hi_items = [_fact_to_item(f, i, 'git-branch', 'medium') for i, f in enumerate(medium[:4])]
+        hi_lo_items = [_fact_to_item(f, 'zap', 'critical') for f in critical[:4]]
+        hi_hi_items = [_fact_to_item(f, 'database', 'high') for f in critical[4:8]]
+        lo_lo_items = [_fact_to_item(f, 'settings', 'low') for f in low_f[:4]]
+        lo_hi_items = [_fact_to_item(f, 'git-branch', 'medium') for f in medium[:4]]
 
         # Ensure no empty quadrants
         if not hi_lo_items:
@@ -1660,11 +1660,42 @@ def _validate_plan_quality(plan: dict) -> list:
 #  PUBLIC API
 # ══════════════════════════════════════════════════════════════════
 
+def _use_full_document(raw_data: str) -> bool:
+    """
+    Return True when the active provider supports a large enough context window
+    to process the entire document in one pass — no chunking needed.
+
+    Gemma 4 (27B / 12B) has a 256K / 128K token context window.  At ~4 chars/token
+    that's ~200K chars before we need to fall back to chunking.  When enabled, the
+    analyzer sees the COMPLETE document, which dramatically improves fact recall for
+    large CSVs, multi-page PDFs, and log files.
+    """
+    provider = getattr(config, "PROVIDER", "openrouter")
+    use_long = getattr(config, "USE_LONG_CONTEXT", True)
+    if not use_long:
+        return False
+    # Long-context mode is meaningful for Ollama (local Gemma 4) and for OpenRouter
+    # when a large-context Gemma 4 model is configured.
+    long_ctx_chars = int(getattr(config, "GEMMA4_LONG_CONTEXT_CHARS", 200_000))
+    if provider == "ollama":
+        return len(raw_data) <= long_ctx_chars
+    if provider == "openrouter":
+        model_all = (
+            getattr(config, "MODEL_ANALYZER", "") or
+            getattr(config, "MODEL_PLANNER", "")
+        )
+        if "gemma-4" in model_all or "gemma4" in model_all:
+            return len(raw_data) <= long_ctx_chars
+    return False
+
+
 def run(raw_data: str) -> dict:
     """
     Two-pass pipeline:
-      Pass 1: Analyze content (with chunk summarization for large inputs)
-      Pass 2: Plan slide narrative (with design seed for variety)
+      Pass 1: Analyze content
+        — Gemma 4 path:    full document in ONE shot (256K context, no chunking)
+        — Fallback path:   chunk → summarize each chunk → synthesize
+      Pass 2: Plan slide narrative (with design seed for visual variety)
     """
     from utils.icons import get_all_icon_names, suggest_icons_for_topic
     from utils.icon_fetcher import fetch_and_register, detect_unknown_brands
@@ -1677,43 +1708,60 @@ def run(raw_data: str) -> dict:
     raw_sample_max = int(getattr(config, "PLANNER_RAW_SAMPLE_STORE_CHARS", 4000))
     analysis_json_max = int(getattr(config, "PLANNER_ANALYSIS_JSON_MAX_CHARS", 8000))
 
-    chunks      = _chunk_text(raw_data)
     total_chars = len(raw_data)
 
-    if not chunks:
+    if not raw_data.strip():
         print("  [Planner] WARNING: Empty input")
         return {}
 
-    # ── PASS 1A: For large inputs, pre-summarize each chunk ───────
+    # ── PASS 1A: Prepare document sample for the Analyzer ─────────
+    #
+    # Gemma 4 long-context path: feed the ENTIRE document directly.
+    # No chunking, no summarization, no information loss.
+    # The model sees everything in one pass — same as a human reading the whole file.
+    #
+    # Legacy fallback (non-Gemma-4 providers): chunk → pre-summarize → synthesize.
+
     chunk_summaries_section = ""
-    if len(chunks) > 4:
-        print(f"  [Planner] Large input ({len(chunks)} chunks) — pre-summarizing all chunks...")
-        summaries = _summarize_chunks(chunks)
-        all_facts    = []
-        all_entities = []
-        all_anomalies = []
-        for s in summaries:
-            all_facts.extend(s.get('facts', []))
-            all_entities.extend(s.get('entities', []))
-            all_anomalies.extend(s.get('anomalies', []))
-        # Deduplicate
-        all_entities = list(dict.fromkeys(all_entities))[:30]
-        chunk_summaries_section = (
-            f"\nCHUNK SUMMARIES (from {len(chunks)} sections of the full document):\n"
-            + json.dumps({
-                "total_facts_extracted": len(all_facts),
-                "sample_facts": all_facts[:40],
-                "all_entities": all_entities[:25],
-                "anomalies": all_anomalies[:15],
-            }, indent=2)[:summaries_json_max]
+
+    if _use_full_document(raw_data):
+        long_ctx_chars = int(getattr(config, "GEMMA4_LONG_CONTEXT_CHARS", 200_000))
+        sample = raw_data[:long_ctx_chars]
+        chunks = [sample]
+        provider = getattr(config, "PROVIDER", "openrouter")
+        model_label = getattr(config, "OLLAMA_MODEL", "gemma4") if provider == "ollama" else "Gemma 4"
+        print(
+            f"  [Planner] ✨ Gemma 4 long-context mode: full document in one pass "
+            f"({len(sample):,} chars, no chunking) — {model_label}"
         )
-        # Use first + last chunk as text sample; summaries carry the rest
-        sample = chunks[0][:first_n] + "\n\n---\n\n" + chunks[-1][:last_n]
     else:
-        # Small input: stitch chunks up to ANALYZER_JOIN_MAX_CHARS
-        joined = "\n\n---\n\n".join(chunks)
-        sample = joined[: min(len(joined), join_max)]
-        chunk_summaries_section = ""
+        chunks = _chunk_text(raw_data)
+        if not chunks:
+            print("  [Planner] WARNING: Empty input after chunking")
+            return {}
+
+        if len(chunks) > 4:
+            print(f"  [Planner] Large input ({len(chunks)} chunks) — pre-summarizing all chunks...")
+            summaries = _summarize_chunks(chunks)
+            all_facts, all_entities, all_anomalies = [], [], []
+            for s in summaries:
+                all_facts.extend(s.get('facts', []))
+                all_entities.extend(s.get('entities', []))
+                all_anomalies.extend(s.get('anomalies', []))
+            all_entities = list(dict.fromkeys(all_entities))[:30]
+            chunk_summaries_section = (
+                f"\nCHUNK SUMMARIES (from {len(chunks)} sections of the full document):\n"
+                + json.dumps({
+                    "total_facts_extracted": len(all_facts),
+                    "sample_facts": all_facts[:40],
+                    "all_entities": all_entities[:25],
+                    "anomalies": all_anomalies[:15],
+                }, indent=2)[:summaries_json_max]
+            )
+            sample = chunks[0][:first_n] + "\n\n---\n\n" + chunks[-1][:last_n]
+        else:
+            joined = "\n\n---\n\n".join(chunks)
+            sample = joined[: min(len(joined), join_max)]
 
     # ── PASS 1B: LLM Analyzer ────────────────────────────────────
     print("  [Planner] Step 1/2: Analyzing content...")

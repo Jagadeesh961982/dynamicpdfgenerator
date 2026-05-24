@@ -229,12 +229,14 @@ async def render_file(
     try:
         if file is not None and file.filename:
             suffix = Path(file.filename).suffix.lower() or ".txt"
-            if suffix not in {".pdf", ".csv", ".txt", ".json", ".md"}:
+            _BINARY_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif"}
+            _TEXT_EXTS   = {".csv", ".txt", ".json", ".md"}
+            if suffix not in _BINARY_EXTS | _TEXT_EXTS:
                 suffix = ".txt"
             in_path = work_dir / f"input{suffix}"
             content = await file.read()
             _check_upload_size(content)
-            if suffix == ".pdf":
+            if suffix in _BINARY_EXTS:
                 in_path.write_bytes(content)
             else:
                 in_path.write_text(content.decode("utf-8", errors="replace"), encoding="utf-8")

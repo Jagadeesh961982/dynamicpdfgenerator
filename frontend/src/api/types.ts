@@ -1,4 +1,4 @@
-export type Provider = "openrouter" | "gemini" | "nvidia";
+export type Provider = "ollama" | "openrouter" | "gemini" | "nvidia";
 export type VisualStyle = "notebooklm" | "modern" | "dark" | "auto";
 
 export interface AgentModels {

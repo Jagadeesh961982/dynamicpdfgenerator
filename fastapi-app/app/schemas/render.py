@@ -2,7 +2,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-Provider = Literal["openrouter", "gemini", "nvidia"]
+Provider = Literal["ollama", "openrouter", "gemini", "nvidia"]
 
 
 class AgentModels(BaseModel):

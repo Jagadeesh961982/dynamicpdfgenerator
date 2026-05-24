@@ -27,7 +27,24 @@ except ImportError:
     pass
 
 # ── Provider ───────────────────────────────────────────────────────
-PROVIDER = os.getenv("PROVIDER", "openrouter")   # "openrouter" | "gemini" | "nvidia"
+# "ollama"      → Local Gemma 4 via Ollama (no API key, fully private)
+# "openrouter"  → Gemma 4 or any model via OpenRouter API
+# "gemini"      → Gemma 4 / Gemini direct via Google AI Studio
+# "nvidia"      → Models via NVIDIA NIM API
+PROVIDER = os.getenv("PROVIDER", "openrouter")
+
+# ── Ollama (local Gemma 4, no API key required) ────────────────────
+# Setup: https://ollama.ai  →  ollama pull gemma4:27b
+# Context windows: gemma4:27b=256K, gemma4:12b=128K, gemma4:4b=128K
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "gemma4:27b")
+
+# Long-context mode (Gemma 4 only):
+# When PROVIDER=ollama, skip chunking entirely for docs that fit in the context window.
+# Gemma 4's 256K window processes entire large PDFs/CSVs in one shot — dramatically
+# better fact recall vs. the old chunk-and-summarize approach.
+USE_LONG_CONTEXT          = os.getenv("USE_LONG_CONTEXT", "true").lower() == "true"
+GEMMA4_LONG_CONTEXT_CHARS = int(os.getenv("GEMMA4_LONG_CONTEXT_CHARS", "200000"))
 
 # ── NVIDIA API Key ─────────────────────────────────────────────────
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
@@ -40,16 +57,21 @@ OPENROUTER_SITE_URL  = os.getenv("OPENROUTER_SITE_URL", "")
 OPENROUTER_SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", "NotebookLM PDF Generator")
 
 # ── Models per agent ───────────────────────────────────────────────
-MODEL_ANALYZER  = os.getenv("MODEL_ANALYZER",  "google/gemini-2.5-flash")
-MODEL_PLANNER   = os.getenv("MODEL_PLANNER",   "google/gemini-2.5-flash")
-MODEL_DESIGNER  = os.getenv("MODEL_DESIGNER",  "google/gemini-2.5-flash")
-MODEL_ASSEMBLER = os.getenv("MODEL_ASSEMBLER", "google/gemini-2.5-flash")
-MODEL_CRITIC    = os.getenv("MODEL_CRITIC",    "google/gemini-2.5-flash")
+# Defaults target Gemma 4 via OpenRouter free tier.
+# When PROVIDER=ollama, _resolve_model() substitutes OLLAMA_MODEL automatically.
+# Override individually or use MODEL_ALL env var to set all agents at once.
+MODEL_ANALYZER  = os.getenv("MODEL_ANALYZER",  "google/gemma-4-27b-it")
+MODEL_PLANNER   = os.getenv("MODEL_PLANNER",   "google/gemma-4-27b-it")
+MODEL_DESIGNER  = os.getenv("MODEL_DESIGNER",  "google/gemma-4-27b-it")
+MODEL_ASSEMBLER = os.getenv("MODEL_ASSEMBLER", "google/gemma-4-27b-it")
+MODEL_CRITIC    = os.getenv("MODEL_CRITIC",    "google/gemma-4-27b-it")
 
 # ── Gemini direct (only if PROVIDER = "gemini") ────────────────────
 GEMINI_KEY_1 = os.getenv("GEMINI_KEY_1", "")
 GEMINI_KEY_2 = os.getenv("GEMINI_KEY_2", "")
+GEMINI_KEY_3 = os.getenv("GEMINI_KEY_3", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+print(f"Using Gemini model: {GEMINI_MODEL}")
 
 # ── Pipeline settings ──────────────────────────────────────────────
 MAX_ITERATIONS  = 3       # Max critic→redesign loops
